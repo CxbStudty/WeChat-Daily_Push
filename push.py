@@ -6,7 +6,7 @@ OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
 PUSHPLUS_TOKEN = os.environ["PUSHPLUS_TOKEN"]
 
 # 明确指定模型 ID
-MODEL = "qwen/qwen3.6-plus:free"
+MODEL = "qwen/qwen3.8-27b:free"
 
 # ---------- 1. 调用 OpenRouter 生成内容 ----------
 system_prompt = "你是一个温暖的晨间推送助手，用简洁、积极的语言生成每日早安内容。"
