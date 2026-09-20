@@ -41,12 +41,15 @@ GOLD_API_URL = "https://xaus.com/api/v1/spot"
 # 如果好友 Token 重新生成过，要更新这里。
 # ============================================================
 
+# 自己：使用 PUSHPLUS_TOKEN 直接发送给自己
+# 不要把自己的 Token 填到 RECIPIENTS 里，也不要给自己的消息传 "to"。
+MY_RECIPIENT = {
+    "name": "我",
+    "city": "烟台",
+}
+
+# 好友：这里填写“我的好友”中的好友 Token
 RECIPIENTS = [
-    {
-        "name": "我",
-        "token": "67e80b97101d4b09b9e5651e32a1f765",
-        "city": "烟台",
-    },
     {
         "name": "LNY",
         "token": "210c090066b44036aa3b0e04ed58722a",
@@ -808,6 +811,73 @@ def render_message(name, weather, gold, edited):
 # PushPlus
 # ============================================================
 
+def send_to_self(content):
+    """
+    给自己发送：
+    使用 PUSHPLUS_TOKEN 作为发送账号 Token，
+    不传 "to"，这样 PushPlus 会发送给当前账号本人。
+    """
+
+    print("📨 正在发送给：我")
+
+    payload = {
+        "token": PUSHPLUS_TOKEN.strip(),
+        "title": "☀️ 每日早报",
+        "content": content,
+        "template": "html",
+        "channel": "wechat",
+    }
+
+    response = session.post(
+        PUSHPLUS_URL,
+        json=payload,
+        timeout=30
+    )
+
+    print(
+        f"PushPlus HTTP 状态：{response.status_code}"
+    )
+
+    try:
+        result = response.json()
+    except Exception:
+        print("❌ PushPlus 返回不是 JSON：")
+        print(response.text)
+        return False
+
+    print(f"📡 PushPlus 返回：{result}")
+
+    code = result.get("code")
+
+    if code == 200:
+        print("✅ 我 PushPlus 请求成功")
+        return True
+
+    print(
+        f"❌ 我 PushPlus 业务错误："
+        f"{result.get('msg')} / {result.get('data')}"
+    )
+
+    if code == 903:
+        print(
+            "⚠️ PushPlus Token 无效，请检查 GitHub Secret "
+            "PUSHPLUS_TOKEN 是否填写为自己的 PushPlus 用户 Token。"
+        )
+
+    elif code == 905:
+        print(
+            "⚠️ PushPlus 当前账号尚未完成实名认证。"
+        )
+
+    elif code == 999:
+        print(
+            "⚠️ PushPlus 返回 999。请检查自己的 PushPlus 账号、"
+            "公众号关注关系以及 PUSHPLUS_TOKEN。"
+        )
+
+    return False
+
+
 def send_to_friend(friend_token, content, name):
 
     # 防止复制 Token 时混入空格 / Tab / 换行
@@ -937,7 +1007,98 @@ def main():
 
 
     # --------------------------------------------------------
-    # 2. 每个人分别处理
+    # 2. 处理自己
+    # --------------------------------------------------------
+
+    name = MY_RECIPIENT["name"]
+    city = MY_RECIPIENT["city"]
+
+    print("\n" + "=" * 60)
+    print(f"👤 正在处理：{name}")
+    print(f"📍 城市：{city}")
+    print("=" * 60)
+
+    try:
+
+        weather = get_weather(city)
+
+        print(
+            f"🌡 {weather['city']}："
+            f"{weather['temperature']}℃"
+        )
+
+    except Exception as e:
+
+        print(
+            f"❌ {name} 天气获取失败：{e}"
+        )
+
+        weather = None
+
+    if weather is not None:
+
+        try:
+
+            edited = ai_editor(
+                weather,
+                news,
+                gold
+            )
+
+            print("✅ GLM 总编辑完成")
+
+        except Exception as e:
+
+            print(
+                f"❌ GLM 编辑失败：{e}"
+            )
+
+            # AI 失败时仍然给出基础天气信息
+            edited = {
+                "greeting": "早上好，祝你今天顺利！",
+
+                "weather_summary": (
+                    f"今天{weather['city']}天气"
+                    f"{weather_code_to_text(weather['weather_code'])}，"
+                    f"当前气温 {weather['temperature']}℃。"
+                ),
+
+                "weather_advice": (
+                    "请根据实际天气情况合理安排穿衣和出行。"
+                ),
+
+                "domestic_news": [],
+
+                "international_news": [],
+
+                "gold_summary": (
+                    "AI 编辑暂时不可用，以上为 API 获取的金价。"
+                ),
+
+                "daily_tip": "合理安排今天的工作和休息。",
+            }
+
+
+        content = render_message(
+            name=name,
+            weather=weather,
+            gold=gold,
+            edited=edited
+        )
+
+
+        success = send_to_self(
+            content=content
+        )
+
+        if success:
+            print(f"🎉 {name} 推送完成")
+        else:
+            print(f"⚠️ {name} 推送失败")
+
+
+    # --------------------------------------------------------
+    # 3. 处理好友
     # --------------------------------------------------------
 
     for friend in RECIPIENTS:
