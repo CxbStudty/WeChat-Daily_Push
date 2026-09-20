@@ -1,0 +1,28 @@
+name: Daily WeChat Push with Qwen
+
+on:
+  schedule:
+    # 北京时间早上 7:00 = UTC 23:00（前一天）
+    - cron: '0 23 * * *'
+  workflow_dispatch:  # 支持手动触发，方便测试
+
+jobs:
+  daily-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Generate & Push
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+        run: python push.py
