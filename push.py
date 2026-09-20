@@ -19,8 +19,8 @@ MODEL = "glm-4.7-flash"
 # 每项：{"name": 昵称, "token": 好友令牌, "city": 所在城市}
 # 想给自己也发，就把自己的好友令牌加进来
 RECIPIENTS = [
-    {"name": "我",   "token": "自己的好友令牌",  "city": "烟台"},
-    {"name": "LNY", "token": "好友令牌1",       "city": "威海"},
+    {"name": "我",   "token": "67e80b97101d4b09b9e5651e32a1f765",  "city": "烟台"},
+    {"name": "LNY", "token": "	210c090066b44036aa3b0e04ed58722a",       "city": "威海"},
     # 需要更多人就继续加
 ]
 
