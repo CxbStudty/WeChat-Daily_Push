@@ -1,28 +1,44 @@
 import os
-import time
+import json
+import re
+from datetime import datetime, timedelta, timezone
+from html import escape
+
 import requests
-from datetime import datetime
+
 
 # ============================================================
-# 环境变量
+# 配置
 # ============================================================
 
-ZHIPU_API_KEY = os.environ.get("ZHIPU_API_KEY", "").strip()
-PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN", "").strip()
+ZHIPU_API_KEY = os.environ["ZHIPU_API_KEY"]
+PUSHPLUS_TOKEN = os.environ["PUSHPLUS_TOKEN"]
+NEWS_API_KEY = os.environ["NEWS_API_KEY"]
 
 MODEL = "glm-4.7-flash"
 
+ZHIPU_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+PUSHPLUS_URL = "https://www.pushplus.plus/send"
+
+OPEN_METEO_GEOCODING = "https://geocoding-api.open-meteo.com/v1/search"
+OPEN_METEO_WEATHER = "https://api.open-meteo.com/v1/forecast"
+
+NEWS_API_URL = "https://newsapi.org/v2/everything"
+
+GOLD_API_URL = "https://xaus.com/api/v1/spot"
+
+
 # ============================================================
-# 收件人配置
+# 每个人的信息
+# ============================================================
 #
-# 每个人必须单独配置：
-# name  = 昵称
-# token = 这个人的 PushPlus 好友令牌
+# token = PushPlus 好友 Token
 # city  = 这个人的城市
 #
 # 注意：
-# token 前后不要有空格、Tab、换行。
-# 程序本身也会自动 strip()。
+# 不要把自己的 PUSHPLUS_TOKEN 填到这里。
+#
+# 如果好友 Token 重新生成过，要更新这里。
 # ============================================================
 
 RECIPIENTS = [
@@ -40,22 +56,31 @@ RECIPIENTS = [
 
 
 # ============================================================
-# 工具函数
+# HTTP Session
 # ============================================================
 
-def mask_token(token):
-    """
-    日志中只显示 Token 的首尾部分，避免完整 Token 出现在 GitHub Actions 日志。
-    """
-    token = token.strip()
+session = requests.Session()
 
-    if not token:
-        return "(空)"
+session.headers.update({
+    "User-Agent": "DailyMorningPush/1.0"
+})
 
-    if len(token) <= 8:
-        return "****"
 
-    return f"{token[:4]}****{token[-4:]}"
+# ============================================================
+# 通用 GET
+# ============================================================
+
+def http_get(url, params=None, headers=None, timeout=20):
+    response = session.get(
+        url,
+        params=params,
+        headers=headers,
+        timeout=timeout
+    )
+
+    response.raise_for_status()
+
+    return response.json()
 
 
 # ============================================================
@@ -64,894 +89,969 @@ def mask_token(token):
 
 def get_weather(city):
     """
-    根据城市名称获取 Open-Meteo 天气。
+    使用 Open-Meteo：
 
-    返回：
-    {
-        "city": ...,
-        "weather": ...,
-        "temp": ...,
-        "temp_max": ...,
-        "temp_min": ...,
-        "humidity": ...,
-        "wind_speed": ...,
-        "precip_prob": ...,
-    }
-
-    获取失败返回 None。
+    1. 城市名 -> 经纬度
+    2. 经纬度 -> 当前天气 + 今日天气
     """
 
-    city = str(city).strip()
+    print(f"🌤 正在获取 {city} 天气...")
 
-    if not city:
-        print("❌ 天气查询失败：城市为空")
-        return None
-
-    try:
-        # ----------------------------------------------------
-        # 1. 地理编码
-        # ----------------------------------------------------
-
-        geo_url = "https://geocoding-api.open-meteo.com/v1/search"
-
-        geo_params = {
+    geo = http_get(
+        OPEN_METEO_GEOCODING,
+        params={
             "name": city,
-            "count": 5,
+            "count": 1,
             "language": "zh",
             "format": "json",
+            "countryCode": "CN",
         }
+    )
 
-        print(f"🌍 正在查询城市：{city}")
+    results = geo.get("results", [])
 
-        geo_resp = requests.get(
-            geo_url,
-            params=geo_params,
-            timeout=15,
-        )
+    if not results:
+        raise RuntimeError(f"找不到城市：{city}")
 
-        geo_resp.raise_for_status()
+    location = results[0]
 
-        geo_data = geo_resp.json()
+    latitude = location["latitude"]
+    longitude = location["longitude"]
 
-        results = geo_data.get("results", [])
+    real_city = location.get("name", city)
 
-        if not results:
-            print(f"❌ 未找到城市：{city}")
-            return None
+    weather = http_get(
+        OPEN_METEO_WEATHER,
+        params={
+            "latitude": latitude,
+            "longitude": longitude,
 
-        # ----------------------------------------------------
-        # 2. 找中国的匹配城市
-        #
-        # Open-Meteo 有时会返回多个同名地点。
-        # 优先选择中国的结果。
-        # ----------------------------------------------------
+            "current": ",".join([
+                "temperature_2m",
+                "apparent_temperature",
+                "relative_humidity_2m",
+                "precipitation",
+                "weather_code",
+                "wind_speed_10m",
+            ]),
 
-        result = None
+            "daily": ",".join([
+                "weather_code",
+                "temperature_2m_max",
+                "temperature_2m_min",
+                "precipitation_probability_max",
+                "sunrise",
+                "sunset",
+            ]),
 
-        for item in results:
-            if item.get("country_code") == "CN":
-                result = item
-                break
-
-        if result is None:
-            result = results[0]
-
-        lat = result.get("latitude")
-        lon = result.get("longitude")
-
-        city_name = result.get("name", city)
-        country = result.get("country", "")
-        admin1 = result.get("admin1", "")
-
-        if lat is None or lon is None:
-            print(f"❌ 城市 {city} 没有有效经纬度")
-            return None
-
-        print(
-            f"📍 地理编码：{city} → "
-            f"{city_name} / {admin1} / {country} "
-            f"({lat}, {lon})"
-        )
-
-        # ----------------------------------------------------
-        # 3. 获取天气
-        # ----------------------------------------------------
-
-        weather_url = "https://api.open-meteo.com/v1/forecast"
-
-        weather_params = {
-            "latitude": lat,
-            "longitude": lon,
-            "current": (
-                "temperature_2m,"
-                "relative_humidity_2m,"
-                "weather_code,"
-                "wind_speed_10m"
-            ),
-            "daily": (
-                "temperature_2m_max,"
-                "temperature_2m_min,"
-                "precipitation_probability_max"
-            ),
             "timezone": "Asia/Shanghai",
             "forecast_days": 1,
         }
+    )
 
-        print(f"🌤️ 正在获取 {city_name} 天气...")
+    current = weather.get("current", {})
+    daily = weather.get("daily", {})
 
-        weather_resp = requests.get(
-            weather_url,
-            params=weather_params,
-            timeout=15,
-        )
+    return {
+        "city": real_city,
 
-        weather_resp.raise_for_status()
+        "latitude": latitude,
+        "longitude": longitude,
 
-        weather_data = weather_resp.json()
+        "temperature": current.get("temperature_2m"),
+        "apparent_temperature": current.get("apparent_temperature"),
+        "humidity": current.get("relative_humidity_2m"),
+        "precipitation": current.get("precipitation"),
+        "weather_code": current.get("weather_code"),
+        "wind_speed": current.get("wind_speed_10m"),
 
-        if "current" not in weather_data:
-            print(f"❌ {city} 天气数据中没有 current")
-            return None
-
-        if "daily" not in weather_data:
-            print(f"❌ {city} 天气数据中没有 daily")
-            return None
-
-        current = weather_data["current"]
-        daily = weather_data["daily"]
-
-        # ----------------------------------------------------
-        # 4. 天气代码转换
-        # ----------------------------------------------------
-
-        code_map = {
-            0: "晴",
-            1: "大部晴朗",
-            2: "多云",
-            3: "阴",
-
-            45: "雾",
-            48: "雾凇",
-
-            51: "毛毛雨",
-            53: "小雨",
-            55: "中雨",
-
-            56: "冻毛毛雨",
-            57: "冻雨",
-
-            61: "小雨",
-            63: "中雨",
-            65: "大雨",
-
-            66: "冻雨",
-            67: "强冻雨",
-
-            71: "小雪",
-            73: "中雪",
-            75: "大雪",
-            77: "雪粒",
-
-            80: "阵雨",
-            81: "中阵雨",
-            82: "强阵雨",
-
-            85: "小阵雪",
-            86: "大阵雪",
-
-            95: "雷阵雨",
-            96: "雷阵雨伴小冰雹",
-            99: "雷阵雨伴大冰雹",
-        }
-
-        weather_code = current.get("weather_code")
-
-        weather_desc = code_map.get(
-            weather_code,
-            f"未知天气({weather_code})",
-        )
-
-        # ----------------------------------------------------
-        # 5. 提取数据
-        # ----------------------------------------------------
-
-        temp = current.get("temperature_2m")
-        humidity = current.get("relative_humidity_2m")
-        wind_speed = current.get("wind_speed_10m")
-
-        temp_max_list = daily.get("temperature_2m_max", [])
-        temp_min_list = daily.get("temperature_2m_min", [])
-        precip_list = daily.get(
-            "precipitation_probability_max",
-            [],
-        )
-
-        if not temp_max_list or not temp_min_list:
-            print(f"❌ {city} 缺少每日最高/最低温度")
-            return None
-
-        temp_max = temp_max_list[0]
-        temp_min = temp_min_list[0]
-
-        precip_prob = (
-            precip_list[0]
-            if precip_list
+        "today_max": (
+            daily.get("temperature_2m_max", [None])[0]
+            if daily.get("temperature_2m_max")
             else None
-        )
+        ),
 
-        weather = {
-            "city": city_name,
-            "weather": weather_desc,
-            "temp": temp,
-            "temp_max": temp_max,
-            "temp_min": temp_min,
-            "humidity": humidity,
-            "wind_speed": wind_speed,
-            "precip_prob": precip_prob,
-        }
+        "today_min": (
+            daily.get("temperature_2m_min", [None])[0]
+            if daily.get("temperature_2m_min")
+            else None
+        ),
 
-        print(
-            f"✅ {city} 天气获取成功："
-            f"{city_name} | "
-            f"{weather_desc} | "
-            f"{temp_min}~{temp_max}°C | "
-            f"当前 {temp}°C"
-        )
+        "rain_probability": (
+            daily.get("precipitation_probability_max", [None])[0]
+            if daily.get("precipitation_probability_max")
+            else None
+        ),
 
-        return weather
+        "sunrise": (
+            daily.get("sunrise", [None])[0]
+            if daily.get("sunrise")
+            else None
+        ),
 
-    except requests.RequestException as e:
-        print(f"❌ {city} 网络请求失败：{e}")
-        return None
-
-    except Exception as e:
-        print(f"❌ 获取 {city} 天气失败：{e}")
-        return None
+        "sunset": (
+            daily.get("sunset", [None])[0]
+            if daily.get("sunset")
+            else None
+        ),
+    }
 
 
 # ============================================================
-# 调用智谱 GLM
+# 天气代码转中文
 # ============================================================
 
-def call_zhipu_with_retry(
-    payload,
-    headers,
-    max_retries=3,
-):
-    """
-    调用智谱 API，遇到限流/平台过载时自动重试。
-    """
+def weather_code_to_text(code):
 
-    error_msg = ""
+    mapping = {
+        0: "晴",
+        1: "基本晴",
+        2: "部分多云",
+        3: "阴",
+        45: "雾",
+        48: "雾凇",
+        51: "小毛毛雨",
+        53: "毛毛雨",
+        55: "较强毛毛雨",
+        56: "冻毛毛雨",
+        57: "较强冻毛毛雨",
+        61: "小雨",
+        63: "中雨",
+        65: "大雨",
+        66: "冻雨",
+        67: "较强冻雨",
+        71: "小雪",
+        73: "中雪",
+        75: "大雪",
+        77: "雪粒",
+        80: "阵雨",
+        81: "较强阵雨",
+        82: "强阵雨",
+        85: "阵雪",
+        86: "较强阵雪",
+        95: "雷暴",
+        96: "雷暴伴冰雹",
+        99: "强雷暴伴冰雹",
+    }
 
-    for attempt in range(max_retries):
+    return mapping.get(code, "天气情况未知")
 
-        try:
-            response = requests.post(
-                "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=120,
-            )
 
-        except requests.RequestException as e:
+# ============================================================
+# 获取昨日日期
+# ============================================================
 
-            error_msg = str(e)
+def get_yesterday():
 
-            print(
-                f"❌ 智谱请求网络错误：{e}"
-            )
+    china_tz = timezone(timedelta(hours=8))
 
-            if attempt < max_retries - 1:
-                wait = 10 * (attempt + 1)
+    now = datetime.now(china_tz)
 
-                print(
-                    f"等待 {wait} 秒后重试..."
-                )
+    yesterday = now.date() - timedelta(days=1)
 
-                time.sleep(wait)
-                continue
+    return yesterday.strftime("%Y-%m-%d")
 
-            raise
 
-        # ----------------------------------------------------
-        # 429
-        # ----------------------------------------------------
+# ============================================================
+# News API
+# ============================================================
 
-        if response.status_code == 429:
+def get_news(query, language="zh", page_size=8):
 
-            try:
-                error_body = response.json()
+    yesterday = get_yesterday()
 
-                error_code = (
-                    error_body
-                    .get("error", {})
-                    .get("code", "")
-                )
+    print(f"📰 获取新闻：{query} / {yesterday}")
 
-                error_msg = (
-                    error_body
-                    .get("error", {})
-                    .get("message", "")
-                )
+    params = {
+        "q": query,
+        "from": yesterday,
+        "to": yesterday,
+        "language": language,
+        "sortBy": "popularity",
+        "pageSize": page_size,
+        "page": 1,
+    }
 
-            except Exception:
+    headers = {
+        "X-Api-Key": NEWS_API_KEY
+    }
 
-                error_code = ""
-                error_msg = response.text
-
-            print(
-                f"⚠️ 智谱 429："
-                f"业务码={error_code}，"
-                f"信息={error_msg}"
-            )
-
-            if attempt < max_retries - 1:
-
-                if error_code == "1302":
-                    wait = 10 * (attempt + 1)
-
-                elif error_code == "1305":
-                    wait = 15 * (attempt + 1)
-
-                else:
-                    wait = 10 * (attempt + 1)
-
-                print(
-                    f"等待 {wait} 秒后重试..."
-                )
-
-                time.sleep(wait)
-                continue
-
-        # ----------------------------------------------------
-        # 非 200
-        # ----------------------------------------------------
-
-        if response.status_code != 200:
-
-            print(
-                "❌ 智谱 API 返回错误："
-                f"{response.status_code}"
-            )
-
-            print(
-                f"响应内容：{response.text}"
-            )
-
-        response.raise_for_status()
-
-        return response
-
-    raise Exception(
-        f"智谱重试 {max_retries} 次后仍然失败："
-        f"{error_msg}"
+    data = http_get(
+        NEWS_API_URL,
+        params=params,
+        headers=headers
     )
 
+    if data.get("status") != "ok":
+        raise RuntimeError(
+            f"News API 错误：{data}"
+        )
+
+    articles = []
+
+    for article in data.get("articles", []):
+
+        title = article.get("title")
+
+        if not title:
+            continue
+
+        description = article.get("description") or ""
+
+        source = (
+            article.get("source", {}).get("name")
+            or "未知来源"
+        )
+
+        url = article.get("url") or ""
+
+        published_at = article.get("publishedAt") or ""
+
+        articles.append({
+            "title": title,
+            "description": description,
+            "source": source,
+            "url": url,
+            "published_at": published_at,
+        })
+
+    return articles
+
 
 # ============================================================
-# 为某个城市生成早安内容
+# 获取国内 / 国际新闻
 # ============================================================
 
-def generate_message(city):
-    """
-    为指定城市生成早安消息。
+def get_all_news():
 
-    注意：
-    这里每调用一次都会重新获取指定城市天气，
-    不会复用其他收件人的天气。
-    """
-
-    city = str(city).strip()
-
-    print("")
-    print("----------------------------------------")
-    print(f"📝 开始生成 {city} 的早安消息")
-    print("----------------------------------------")
-
-    # --------------------------------------------------------
-    # 获取这个收件人对应城市的天气
-    # --------------------------------------------------------
-
-    weather = get_weather(city)
-
-    if weather:
-
-        precip_text = (
-            f"{weather['precip_prob']}%"
-            if weather["precip_prob"] is not None
-            else "暂无数据"
-        )
-
-        weather_context = (
-            f"{weather['city']}今日天气："
-            f"{weather['weather']}，"
-            f"气温 {weather['temp_min']}~"
-            f"{weather['temp_max']}°C，"
-            f"当前 {weather['temp']}°C，"
-            f"湿度 {weather['humidity']}%，"
-            f"风速 {weather['wind_speed']} km/h，"
-            f"降水概率 {precip_text}。"
-        )
-
-        print(
-            f"🌤️ AI 使用的天气："
-            f"{weather_context}"
-        )
-
-    else:
-
-        # ----------------------------------------------------
-        # 天气获取失败
-        #
-        # 不要把其他人的天气拿过来。
-        # 这里明确告诉 AI 天气不可用。
-        # --------------------------------------------------------
-
-        weather_context = (
-            f"{city}今日天气数据暂时获取失败。"
-            "不要猜测具体天气、温度、降雨或风速。"
-        )
-
-        print(
-            f"⚠️ {city} 天气获取失败，"
-            "不会使用其他城市天气代替。"
-        )
-
-    # --------------------------------------------------------
-    # 当前日期
-    # --------------------------------------------------------
-
-    today = datetime.now().strftime(
-        "%Y年%m月%d日"
+    domestic = get_news(
+        '"中国" OR "中国经济" OR "中国社会" OR "中国科技"',
+        language="zh",
+        page_size=8
     )
 
-    # --------------------------------------------------------
-    # System Prompt
-    # --------------------------------------------------------
-
-    system_prompt = (
-        "你是一个温暖的晨间推送助手，"
-        "用简洁、积极、自然的语言生成每日早安内容。"
+    international = get_news(
+        '"国际" OR "美国" OR "欧洲" OR "日本" OR "中东"',
+        language="zh",
+        page_size=8
     )
 
-    # --------------------------------------------------------
-    # User Prompt
-    # --------------------------------------------------------
+    return {
+        "domestic": domestic,
+        "international": international,
+    }
 
-    user_prompt = f"""
-今天是 {today}。
 
-{weather_context}
+# ============================================================
+# 获取国际金价
+# ============================================================
 
-请根据以上信息生成一条早安推送，包含：
+def get_gold_price():
 
-1. 一句温暖的问候语
-2. 一句励志或治愈的短句
-3. 一个今日小贴士
-4. 结合天气给出穿衣、出行和健康建议
+    print("🥇 获取国际金价...")
+
+    data = http_get(
+        GOLD_API_URL,
+        timeout=20
+    )
+
+    price = data.get("spot_usd_oz")
+
+    if price is None:
+        xau = data.get("xau", {})
+        price = xau.get("price")
+
+    if price is None:
+        raise RuntimeError(
+            f"金价 API 返回中没有找到价格：{data}"
+        )
+
+    data_state = data.get("data_state", {})
+
+    return {
+        "price_usd_oz": price,
+        "updated_at": data.get("updated_at"),
+        "as_of": data_state.get("as_of"),
+        "status": data_state.get("status"),
+        "source": data_state.get("source"),
+    }
+
+
+# ============================================================
+# 清理 GLM 返回
+# ============================================================
+
+def clean_json_text(text):
+
+    if not text:
+        return ""
+
+    text = text.strip()
+
+    # 去掉 ```json ... ```
+    text = re.sub(
+        r"^```json\s*",
+        "",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    text = re.sub(
+        r"^```\s*",
+        "",
+        text
+    )
+
+    text = re.sub(
+        r"\s*```$",
+        "",
+        text
+    )
+
+    return text.strip()
+
+
+# ============================================================
+# GLM 总编辑
+# ============================================================
+
+def ai_editor(weather, news, gold):
+
+    print("🤖 GLM 正在进行每日早报总编辑...")
+
+    weather_text = {
+        "城市": weather["city"],
+        "当前温度": weather["temperature"],
+        "体感温度": weather["apparent_temperature"],
+        "天气": weather_code_to_text(weather["weather_code"]),
+        "湿度": weather["humidity"],
+        "降水量": weather["precipitation"],
+        "风速": weather["wind_speed"],
+        "今日最高温": weather["today_max"],
+        "今日最低温": weather["today_min"],
+        "降水概率": weather["rain_probability"],
+        "日出": weather["sunrise"],
+        "日落": weather["sunset"],
+    }
+
+    editor_input = {
+        "weather": weather_text,
+        "yesterday": get_yesterday(),
+        "domestic_news": news["domestic"],
+        "international_news": news["international"],
+        "gold": gold,
+    }
+
+    system_prompt = """
+你是一名高质量的「每日早报总编辑」。
+
+你的任务不是自己搜索事实，也不是凭空创作新闻。
+
+你只能根据用户提供的数据进行编辑。
+
+必须遵守：
+
+1. 天气数据只能使用输入中的天气数据。
+2. 新闻只能根据输入的新闻标题、摘要、来源进行总结。
+3. 不得添加输入中没有的新闻事实。
+4. 不得虚构新闻。
+5. 国际金价只能使用输入中的金价。
+6. 不得自己猜测金价。
+7. 不得生成人民日报金句。
+8. 不得生成诗句。
+9. 不要加入政治立场、政治评价或煽动性语言。
+10. 新闻尽量客观、简洁。
+11. 如果新闻信息不足，就明确说「暂无足够信息」，不要编造。
+12. 可以重新组织新闻标题，使早报更自然。
+13. 可以给天气生成生活建议，但建议必须符合天气数据。
+14. 可以给金价做非常简短的市场信息解读，但不要预测涨跌。
+15. 输出必须是合法 JSON。
+16. 不要使用 Markdown 代码块。
+
+你需要输出：
+
+{
+  "greeting": "简短自然的早安开场",
+  "weather_summary": "天气总结",
+  "weather_advice": "穿衣和出行建议",
+  "domestic_news": [
+    {
+      "title": "新闻标题",
+      "summary": "一句话总结",
+      "source": "来源"
+    }
+  ],
+  "international_news": [
+    {
+      "title": "新闻标题",
+      "summary": "一句话总结",
+      "source": "来源"
+    }
+  ],
+  "gold_summary": "国际金价信息",
+  "daily_tip": "一句实用的小建议"
+}
 
 要求：
 
-- 总字数控制在 150 字以内
-- 语言自然
-- 不要使用 Markdown 标题
-- 如果天气数据获取失败，不要自行猜测天气
-- 不要编造温度、降水概率、风速等天气数据
+国内新闻最多3条。
+国际新闻最多3条。
+
+不要为了凑数量而编造新闻。
+
+整体风格：
+简洁、自然、有一点温度。
+适合早晨通过微信阅读。
+不要写得像新闻联播。
+不要过度使用 emoji。
 """
 
-    headers = {
-        "Authorization": f"Bearer {ZHIPU_API_KEY}",
-        "Content-Type": "application/json",
-    }
+    user_prompt = json.dumps(
+        editor_input,
+        ensure_ascii=False,
+        indent=2
+    )
 
     payload = {
         "model": MODEL,
         "messages": [
             {
                 "role": "system",
-                "content": system_prompt,
+                "content": system_prompt
             },
             {
                 "role": "user",
-                "content": user_prompt,
-            },
+                "content": user_prompt
+            }
         ],
-        "temperature": 0.8,
-        "max_tokens": 2048,
-        "thinking": {
-            "type": "disabled",
-        },
+        "temperature": 0.5,
+        "max_tokens": 2500,
+        "stream": False,
     }
 
-    # --------------------------------------------------------
-    # 调用 GLM
-    # --------------------------------------------------------
-
-    response = call_zhipu_with_retry(
-        payload,
-        headers,
-    )
-
-    response_data = response.json()
-
-    choices = response_data.get(
-        "choices",
-        [],
-    )
-
-    if not choices:
-        raise Exception(
-            "智谱 API 返回中没有 choices"
-        )
-
-    message = choices[0].get(
-        "message",
-        {},
-    )
-
-    ai_content = (
-        message.get("content")
-        or message.get("reasoning_content")
-        or ""
-    )
-
-    ai_content = ai_content.strip()
-
-    if not ai_content:
-        raise Exception(
-            "智谱 API 返回的消息内容为空"
-        )
-
-    print(
-        f"🤖 AI 生成成功："
-        f"{repr(ai_content[:80])}"
-    )
-
-    return ai_content
-
-
-# ============================================================
-# PushPlus 推送
-# ============================================================
-
-def send_to_friend(
-    friend_token,
-    content,
-    recipient_name,
-    city,
-):
-    """
-    将指定内容发送给指定好友。
-    """
-
-    friend_token = str(
-        friend_token
-    ).strip()
-
-    print("")
-    print("----------------------------------------")
-    print("📨 准备 PushPlus 推送")
-    print(f"收件人：{recipient_name}")
-    print(f"城市：{city}")
-    print(
-        f"好友 Token："
-        f"{mask_token(friend_token)}"
-    )
-    print("----------------------------------------")
-
-    payload = {
-        "token": PUSHPLUS_TOKEN,
-        "title": (
-            f"☀️ 早安 · "
-            f"{datetime.now().strftime('%m月%d日')}"
-        ),
-        "content": content,
-        "template": "html",
-        "to": friend_token,
+    headers = {
+        "Authorization": f"Bearer {ZHIPU_API_KEY}",
+        "Content-Type": "application/json",
     }
+
+    response = session.post(
+        ZHIPU_URL,
+        headers=headers,
+        json=payload,
+        timeout=60
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
 
     try:
-
-        response = requests.post(
-            "http://www.pushplus.plus/send",
-            json=payload,
-            timeout=30,
+        content = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        raise RuntimeError(
+            f"GLM 返回格式异常：{data}"
         )
 
-        print(
-            f"📡 PushPlus HTTP 状态："
-            f"{response.status_code}"
-        )
+    content = clean_json_text(content)
 
-        # 尝试解析 JSON
-        try:
-            result = response.json()
-        except Exception:
-            result = None
+    try:
+        result = json.loads(content)
+    except json.JSONDecodeError:
 
-        if result is not None:
+        # 尝试从文本中截取 JSON
+        start = content.find("{")
+        end = content.rfind("}")
 
-            print(
-                f"📡 PushPlus 返回："
-                f"{result}"
-            )
+        if start >= 0 and end > start:
 
-            code = result.get("code")
-
-            if code == 200:
-
-                print(
-                    f"✅ PushPlus 已接受 "
-                    f"{recipient_name} 的发送请求"
+            try:
+                result = json.loads(
+                    content[start:end + 1]
                 )
-
-                print(
-                    "ℹ️ 注意：PushPlus 接口返回 "
-                    "200 主要表示请求已被接受，"
-                    "不等于最终一定送达。"
-                )
-
-            else:
-
-                print(
-                    f"❌ PushPlus 返回业务错误："
-                    f"{result}"
+            except json.JSONDecodeError:
+                raise RuntimeError(
+                    f"GLM 没有返回合法 JSON：\n{content}"
                 )
 
         else:
-
-            print(
-                f"⚠️ PushPlus 返回非 JSON："
-                f"{response.text}"
+            raise RuntimeError(
+                f"GLM 没有返回合法 JSON：\n{content}"
             )
 
-        return response, result
-
-    except requests.RequestException as e:
-
-        print(
-            f"❌ PushPlus 网络请求失败：{e}"
-        )
-
-        raise
+    return result
 
 
 # ============================================================
-# 主流程
+# HTML 渲染
+# ============================================================
+
+def render_news(news_list):
+
+    if not news_list:
+        return "<p>暂无足够新闻信息。</p>"
+
+    html = ""
+
+    for item in news_list:
+
+        title = escape(
+            str(item.get("title", ""))
+        )
+
+        summary = escape(
+            str(item.get("summary", ""))
+        )
+
+        source = escape(
+            str(item.get("source", ""))
+        )
+
+        html += f"""
+        <div style="margin-bottom:12px;">
+            <div style="font-weight:bold;">
+                {title}
+            </div>
+
+            <div style="margin-top:3px;">
+                {summary}
+            </div>
+
+            <div style="color:#888;font-size:12px;margin-top:2px;">
+                来源：{source}
+            </div>
+        </div>
+        """
+
+    return html
+
+
+def render_message(name, weather, gold, edited):
+
+    city = escape(weather["city"])
+
+    greeting = escape(
+        str(edited.get("greeting", "早上好！"))
+    )
+
+    weather_summary = escape(
+        str(
+            edited.get(
+                "weather_summary",
+                ""
+            )
+        )
+    )
+
+    weather_advice = escape(
+        str(
+            edited.get(
+                "weather_advice",
+                ""
+            )
+        )
+    )
+
+    gold_summary = escape(
+        str(
+            edited.get(
+                "gold_summary",
+                ""
+            )
+        )
+    )
+
+    daily_tip = escape(
+        str(
+            edited.get(
+                "daily_tip",
+                ""
+            )
+        )
+    )
+
+    domestic_news = render_news(
+        edited.get("domestic_news", [])
+    )
+
+    international_news = render_news(
+        edited.get("international_news", [])
+    )
+
+    temperature = weather.get("temperature")
+    today_min = weather.get("today_min")
+    today_max = weather.get("today_max")
+
+    gold_price = gold.get("price_usd_oz")
+
+    if isinstance(gold_price, (int, float)):
+        gold_price_text = f"${gold_price:,.2f}/盎司"
+    else:
+        gold_price_text = str(gold_price)
+
+    return f"""
+<div style="
+    font-family:-apple-system,BlinkMacSystemFont,
+    'Segoe UI','Microsoft YaHei',sans-serif;
+    line-height:1.7;
+    color:#222;
+">
+
+    <div style="
+        font-size:20px;
+        font-weight:bold;
+        margin-bottom:8px;
+    ">
+        ☀️ {greeting}
+    </div>
+
+
+    <div style="
+        background:#f5f7fa;
+        padding:12px;
+        border-radius:10px;
+        margin-bottom:15px;
+    ">
+
+        <div style="font-size:17px;font-weight:bold;">
+            🌤 {city} 今日天气
+        </div>
+
+        <div style="margin-top:6px;">
+            当前：{temperature}℃
+        </div>
+
+        <div>
+            今日：{today_min}℃ ～ {today_max}℃
+        </div>
+
+        <div style="margin-top:5px;">
+            {weather_summary}
+        </div>
+
+        <div style="
+            margin-top:6px;
+            color:#555;
+        ">
+            💡 {weather_advice}
+        </div>
+
+    </div>
+
+
+    <div style="
+        font-size:17px;
+        font-weight:bold;
+        margin-bottom:8px;
+    ">
+        🇨🇳 昨日国内新闻
+    </div>
+
+    {domestic_news}
+
+
+    <div style="
+        font-size:17px;
+        font-weight:bold;
+        margin-top:15px;
+        margin-bottom:8px;
+    ">
+        🌍 昨日国际新闻
+    </div>
+
+    {international_news}
+
+
+    <div style="
+        background:#fff8e6;
+        padding:12px;
+        border-radius:10px;
+        margin-top:15px;
+    ">
+
+        <div style="font-size:17px;font-weight:bold;">
+            🥇 国际金价
+        </div>
+
+        <div style="margin-top:5px;">
+            XAU/USD：{gold_price_text}
+        </div>
+
+        <div style="margin-top:5px;">
+            {gold_summary}
+        </div>
+
+    </div>
+
+
+    <div style="
+        margin-top:15px;
+        padding-top:10px;
+        border-top:1px solid #eee;
+    ">
+        💡 <b>今日小贴士：</b>{daily_tip}
+    </div>
+
+
+    <div style="
+        margin-top:18px;
+        color:#999;
+        font-size:11px;
+    ">
+        数据来源：Open-Meteo / News API / XAU Gold Data API
+    </div>
+
+</div>
+"""
+
+
+# ============================================================
+# PushPlus
+# ============================================================
+
+def send_to_friend(friend_token, content, name):
+
+    # 防止复制 Token 时混入空格 / Tab / 换行
+    friend_token = friend_token.strip()
+
+    print(f"📨 正在发送给：{name}")
+    print(f"🔑 Token 长度：{len(friend_token)}")
+
+    payload = {
+        "token": PUSHPLUS_TOKEN.strip(),
+        "title": "☀️ 每日早报",
+        "content": content,
+        "template": "html",
+        "channel": "wechat",
+        "to": friend_token,
+    }
+
+    response = session.post(
+        PUSHPLUS_URL,
+        json=payload,
+        timeout=30
+    )
+
+    print(
+        f"PushPlus HTTP 状态：{response.status_code}"
+    )
+
+    try:
+        result = response.json()
+    except Exception:
+        print("❌ PushPlus 返回不是 JSON：")
+        print(response.text)
+        return False
+
+    print(f"📡 PushPlus 返回：{result}")
+
+    code = result.get("code")
+
+    if code == 200:
+        print(f"✅ {name} PushPlus 请求成功")
+        return True
+
+    print(
+        f"❌ {name} PushPlus 业务错误："
+        f"{result.get('msg')} / {result.get('data')}"
+    )
+
+    if code == 999:
+
+        print(
+            "⚠️ PushPlus 返回 999。"
+            "请检查好友 Token 是否仍是“我的好友”列表中的有效 Token，"
+            "以及好友是否仍保持公众号关注关系。"
+        )
+
+    elif code == 903:
+
+        print(
+            "⚠️ PushPlus Token 无效，请检查 PUSHPLUS_TOKEN。"
+        )
+
+    elif code == 905:
+
+        print(
+            "⚠️ PushPlus 当前账号尚未完成实名认证。"
+        )
+
+    return False
+
+
+# ============================================================
+# 主程序
 # ============================================================
 
 def main():
 
-    print("")
-    print("========================================")
-    print("☀️ Daily WeChat Push")
-    print("========================================")
+    print("=" * 60)
+    print("☀️ 每日早报开始")
+    print("=" * 60)
 
     # --------------------------------------------------------
-    # 检查环境变量
+    # 1. 公共数据
     # --------------------------------------------------------
 
-    if not ZHIPU_API_KEY:
+    print("\n📚 第一步：获取公共数据")
 
-        print(
-            "❌ 缺少环境变量：ZHIPU_API_KEY"
-        )
+    try:
+        news = get_all_news()
+    except Exception as e:
 
-        return
+        print(f"❌ 新闻获取失败：{e}")
 
-    if not PUSHPLUS_TOKEN:
+        news = {
+            "domestic": [],
+            "international": [],
+        }
 
-        print(
-            "❌ 缺少环境变量：PUSHPLUS_TOKEN"
-        )
 
-        return
+    try:
+        gold = get_gold_price()
+    except Exception as e:
 
-    # --------------------------------------------------------
-    # 检查收件人
-    # --------------------------------------------------------
+        print(f"❌ 金价获取失败：{e}")
 
-    if not RECIPIENTS:
+        gold = {
+            "price_usd_oz": "暂时无法获取",
+            "updated_at": None,
+            "as_of": None,
+            "status": "error",
+            "source": None,
+        }
 
-        print(
-            "❌ RECIPIENTS 为空，"
-            "请先配置收件人。"
-        )
 
-        return
+    print("\n📊 公共数据获取完成")
 
     print(
-        f"👥 本次计划处理："
-        f"{len(RECIPIENTS)} 人"
+        f"国内新闻：{len(news['domestic'])} 条"
     )
 
     print(
-        f"⏰ 当前时间："
-        f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        f"国际新闻：{len(news['international'])} 条"
     )
 
-    print("")
+    print(
+        f"国际金价：{gold['price_usd_oz']}"
+    )
 
-    success = 0
-    fail = 0
 
-    # ========================================================
-    # 一个一个处理收件人
-    # ========================================================
+    # --------------------------------------------------------
+    # 2. 每个人分别处理
+    # --------------------------------------------------------
 
-    for index, recipient in enumerate(
-        RECIPIENTS,
-        start=1,
-    ):
+    for friend in RECIPIENTS:
 
-        name = str(
-            recipient.get(
-                "name",
-                "未知",
-            )
-        ).strip()
+        name = friend["name"]
+        token = friend["token"].strip()
+        city = friend["city"]
 
-        city = str(
-            recipient.get(
-                "city",
-                "",
-            )
-        ).strip()
+        print("\n" + "=" * 60)
+        print(f"👤 正在处理：{name}")
+        print(f"📍 城市：{city}")
+        print("=" * 60)
 
-        token = str(
-            recipient.get(
-                "token",
-                "",
-            )
-        ).strip()
-
-        print("")
-        print("")
-        print("========================================")
-        print(
-            f"👤 收件人 {index}/{len(RECIPIENTS)}"
-        )
-        print("========================================")
-
-        print(f"姓名：{name}")
-        print(f"城市：{city}")
-        print(
-            f"Token：{mask_token(token)}"
-        )
 
         # ----------------------------------------------------
-        # 基础检查
-        # ----------------------------------------------------
-
-        if not token:
-
-            print(
-                f"❌ {name} 没有配置好友 Token"
-            )
-
-            fail += 1
-            continue
-
-        if not city:
-
-            print(
-                f"❌ {name} 没有配置城市"
-            )
-
-            fail += 1
-            continue
-
-        # ----------------------------------------------------
-        # 生成这个人的天气 + AI 消息
+        # 天气
         # ----------------------------------------------------
 
         try:
 
-            content = generate_message(
-                city
+            weather = get_weather(city)
+
+            print(
+                f"🌡 {weather['city']}："
+                f"{weather['temperature']}℃"
             )
 
         except Exception as e:
 
-            print("")
             print(
-                f"❌ {name} 的消息生成失败："
-                f"{e}"
+                f"❌ {name} 天气获取失败：{e}"
             )
 
-            fail += 1
-
-            # 一个好友失败不能影响其他好友
             continue
 
-        if not content:
-
-            print(
-                f"❌ {name}："
-                "生成内容为空"
-            )
-
-            fail += 1
-            continue
 
         # ----------------------------------------------------
-        # 推送给这个人的 Token
+        # AI 总编辑
         # ----------------------------------------------------
 
         try:
 
-            response, result = send_to_friend(
-                friend_token=token,
-                content=content,
-                recipient_name=name,
-                city=city,
+            edited = ai_editor(
+                weather,
+                news,
+                gold
             )
 
-            # ------------------------------------------------
-            # 判断 PushPlus 请求是否成功
-            # ------------------------------------------------
-
-            if (
-                response.status_code == 200
-                and isinstance(result, dict)
-                and result.get("code") == 200
-            ):
-
-                success += 1
-
-                print(
-                    f"✅ {name}："
-                    "PushPlus 请求提交成功"
-                )
-
-            else:
-
-                fail += 1
-
-                print(
-                    f"❌ {name}："
-                    "PushPlus 请求提交失败"
-                )
+            print("✅ GLM 总编辑完成")
 
         except Exception as e:
 
-            print("")
             print(
-                f"❌ {name} 推送失败：{e}"
+                f"❌ GLM 编辑失败：{e}"
             )
 
-            fail += 1
+            # AI 失败时仍然给出基础天气信息
+            edited = {
+                "greeting": "早上好，祝你今天顺利！",
+
+                "weather_summary": (
+                    f"今天{weather['city']}天气"
+                    f"{weather_code_to_text(weather['weather_code'])}，"
+                    f"当前气温 {weather['temperature']}℃。"
+                ),
+
+                "weather_advice": (
+                    "请根据实际天气情况合理安排穿衣和出行。"
+                ),
+
+                "domestic_news": [],
+
+                "international_news": [],
+
+                "gold_summary": (
+                    "AI 编辑暂时不可用，以上为 API 获取的金价。"
+                ),
+
+                "daily_tip": "合理安排今天的工作和休息。",
+            }
+
 
         # ----------------------------------------------------
-        # 收件人之间间隔
+        # 生成 HTML
         # ----------------------------------------------------
 
-        if index < len(RECIPIENTS):
-
-            print(
-                "⏳ 等待 2 秒后处理下一个收件人..."
-            )
-
-            time.sleep(2)
-
-    # ========================================================
-    # 最终统计
-    # ========================================================
-
-    print("")
-    print("")
-    print("========================================")
-    print("🎉 全部处理完成")
-    print("========================================")
-    print(f"成功：{success} 人")
-    print(f"失败：{fail} 人")
-    print("========================================")
+        content = render_message(
+            name=name,
+            weather=weather,
+            gold=gold,
+            edited=edited
+        )
 
 
-# ============================================================
-# 程序入口
-# ============================================================
+        # ----------------------------------------------------
+        # PushPlus
+        # ----------------------------------------------------
+
+        success = send_to_friend(
+            friend_token=token,
+            content=content,
+            name=name
+        )
+
+        if success:
+            print(f"🎉 {name} 推送完成")
+        else:
+            print(f"⚠️ {name} 推送失败")
+
+
+    print("\n" + "=" * 60)
+    print("🏁 每日早报执行结束")
+    print("=" * 60)
+
 
 if __name__ == "__main__":
     main()
