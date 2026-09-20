@@ -14,14 +14,21 @@ ZHIPU_API_KEY = os.environ["ZHIPU_API_KEY"]
 PUSHPLUS_TOKEN = os.environ["PUSHPLUS_TOKEN"]
 
 MODEL = "glm-4.7-flash"
-CITY = "烟台"   # ← 改成你的城市
+
+# ---------- 收件人配置 ----------
+# 每项：{"name": 昵称, "token": 好友令牌, "city": 所在城市}
+# 想给自己也发，就把自己的好友令牌加进来
+RECIPIENTS = [
+    {"name": "我",   "token": "自己的好友令牌",  "city": "烟台"},
+    {"name": "张三", "token": "好友令牌1",       "city": "北京"},
+    {"name": "李四", "token": "好友令牌2",       "city": "上海"},
+    # 需要更多人就继续加
+]
 
 
 # ---------- 天气获取（Open-Meteo，无需 API Key）----------
 def get_weather(city):
-    """获取指定城市的当前天气和今日预报"""
     try:
-        # 1. 地理编码：城市名 → 经纬度
         geo_url = (
             f"https://geocoding-api.open-meteo.com/v1/search"
             f"?name={city}&count=1&language=zh&format=json"
@@ -38,7 +45,6 @@ def get_weather(city):
         lon = result["longitude"]
         city_name = result.get("name", city)
 
-        # 2. 获取天气数据
         weather_url = (
             f"https://api.open-meteo.com/v1/forecast"
             f"?latitude={lat}&longitude={lon}"
@@ -52,7 +58,6 @@ def get_weather(city):
         current = weather_data["current"]
         daily = weather_data["daily"]
 
-        # 3. WMO 天气代码转中文
         code_map = {
             0: "晴", 1: "大部晴朗", 2: "多云", 3: "阴",
             45: "雾", 48: "雾凇",
@@ -84,55 +89,7 @@ def get_weather(city):
         return None
 
 
-# ---------- 获取天气并构建上下文 ----------
-weather = get_weather(CITY)
-
-if weather:
-    weather_context = (
-        f"{weather['city']}今日天气：{weather['weather']}，"
-        f"气温 {weather['temp_min']}~{weather['temp_max']}°C，"
-        f"当前 {weather['temp']}°C，"
-        f"湿度 {weather['humidity']}%，"
-        f"风速 {weather['wind_speed']} km/h，"
-        f"降水概率 {weather['precip_prob']}%。"
-    )
-    print("天气信息：", weather_context)
-else:
-    weather_context = ""
-    print("未获取到天气数据，将生成通用早安内容。")
-
-
-# ---------- 1. 准备 GLM 请求 ----------
-system_prompt = "你是一个温暖的晨间推送助手，用简洁、积极的语言生成每日早安内容。"
-
-user_prompt = f"""今天是 {datetime.now().strftime('%Y年%m月%d日')}。
-
-{weather_context}
-
-请根据以上信息生成一条早安推送，包含：
-1. 一句温暖的问候语
-2. 一句励志或治愈的短句
-3. 一个今日小贴士（结合天气给出穿衣、出行或健康建议）
-总字数控制在 150 字以内，语言自然，不要使用 Markdown 标题格式。"""
-
-headers = {
-    "Authorization": f"Bearer {ZHIPU_API_KEY}",
-    "Content-Type": "application/json",
-}
-
-payload = {
-    "model": MODEL,
-    "messages": [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ],
-    "temperature": 0.8,
-    "max_tokens": 2048,
-    "thinking": {"type": "disabled"},
-}
-
-
-# ---------- 2. 带重试的智谱GLM调用 ----------
+# ---------- 带重试的 GLM 调用 ----------
 def call_zhipu_with_retry(payload, headers, max_retries=3):
     error_msg = ""
     for attempt in range(max_retries):
@@ -170,7 +127,6 @@ def call_zhipu_with_retry(payload, headers, max_retries=3):
             time.sleep(wait)
             continue
 
-        print(f"智谱GLM 状态码: {response.status_code}")
         if response.status_code != 200:
             print(f"智谱GLM 响应内容: {response.text}")
         response.raise_for_status()
@@ -179,29 +135,121 @@ def call_zhipu_with_retry(payload, headers, max_retries=3):
     raise Exception(f"重试 {max_retries} 次后仍然失败，最后错误: {error_msg}")
 
 
-response = call_zhipu_with_retry(payload, headers)
+# ---------- 为某个城市生成早安内容 ----------
+def generate_message(city):
+    weather = get_weather(city)
 
-# ---------- 3. 提取内容 ----------
-message = response.json()["choices"][0]["message"]
-ai_content = message.get("content") or message.get("reasoning_content", "")
-ai_content = ai_content.strip()
+    if weather:
+        weather_context = (
+            f"{weather['city']}今日天气：{weather['weather']}，"
+            f"气温 {weather['temp_min']}~{weather['temp_max']}°C，"
+            f"当前 {weather['temp']}°C，"
+            f"湿度 {weather['humidity']}%，"
+            f"风速 {weather['wind_speed']} km/h，"
+            f"降水概率 {weather['precip_prob']}%。"
+        )
+        print("天气信息：", weather_context)
+    else:
+        weather_context = ""
 
-print("AI 生成内容：", repr(ai_content))
+    system_prompt = "你是一个温暖的晨间推送助手，用简洁、积极的语言生成每日早安内容。"
 
-if not ai_content:
-    raise Exception("AI 返回内容为空")
+    user_prompt = f"""今天是 {datetime.now().strftime('%Y年%m月%d日')}。
 
-# ---------- 4. PushPlus 推送 ----------
-push_resp = requests.post(
-    "http://www.pushplus.plus/send",
-    json={
-        "token": PUSHPLUS_TOKEN,
-        "title": f"☀️ 早安 · {datetime.now().strftime('%m月%d日')}",
-        "content": ai_content,
-        "template": "html",
-    },
-    timeout=30,
-)
+{weather_context}
 
-print(f"PushPlus 状态码: {push_resp.status_code}")
-print(f"PushPlus 响应内容: {push_resp.text}")
+请根据以上信息生成一条早安推送，包含：
+1. 一句温暖的问候语
+2. 一句励志或治愈的短句
+3. 一个今日小贴士（结合天气给出穿衣、出行或健康建议）
+总字数控制在 150 字以内，语言自然，不要使用 Markdown 标题格式。"""
+
+    headers = {
+        "Authorization": f"Bearer {ZHIPU_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    payload = {
+        "model": MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.8,
+        "max_tokens": 2048,
+        "thinking": {"type": "disabled"},
+    }
+
+    response = call_zhipu_with_retry(payload, headers)
+    message = response.json()["choices"][0]["message"]
+    ai_content = message.get("content") or message.get("reasoning_content", "")
+    ai_content = ai_content.strip()
+
+    print("AI 生成内容：", repr(ai_content[:60]), "...")
+    return ai_content
+
+
+# ---------- 推送给某个好友 ----------
+def send_to_friend(friend_token, content):
+    push_resp = requests.post(
+        "http://www.pushplus.plus/send",
+        json={
+            "token": PUSHPLUS_TOKEN,
+            "title": f"☀️ 早安 · {datetime.now().strftime('%m月%d日')}",
+            "content": content,
+            "template": "html",
+            "to": friend_token,
+        },
+        timeout=30,
+    )
+    return push_resp
+
+
+# ---------- 主流程 ----------
+def main():
+    if not RECIPIENTS:
+        print("收件人列表为空，请先配置 RECIPIENTS")
+        return
+
+    success, fail = 0, 0
+
+    for r in RECIPIENTS:
+        name = r.get("name", "未知")
+        city = r.get("city", "北京")
+        token = r.get("token", "")
+
+        print(f"\n===== 处理 {name}（{city}）=====")
+
+        if not token:
+            print(f"跳过 {name}：未配置好友令牌")
+            fail += 1
+            continue
+
+        try:
+            content = generate_message(city)
+            if not content:
+                print(f"跳过 {name}：生成内容为空")
+                fail += 1
+                continue
+
+            resp = send_to_friend(token, content)
+            print(f"{name} 推送结果：{resp.json()}")
+
+            if resp.status_code == 200 and resp.json().get("code") == 200:
+                success += 1
+            else:
+                fail += 1
+
+            # 每个收件人间隔 2 秒，避免触发 PushPlus 频率限制
+            time.sleep(2)
+
+        except Exception as e:
+            print(f"处理 {name} 出错：{e}")
+            fail += 1
+            continue
+
+    print(f"\n===== 完成：成功 {success} 人，失败 {fail} 人 =====")
+
+
+if __name__ == "__main__":
+    main()
