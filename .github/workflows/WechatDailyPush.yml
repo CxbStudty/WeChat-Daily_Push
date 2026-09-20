@@ -25,4 +25,5 @@ jobs:
         env:
           ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          NEWS_API_KEY: ${{ secrets.NEWS_API_KEY }}
         run: python push.py
