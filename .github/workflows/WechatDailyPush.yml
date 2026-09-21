@@ -10,8 +10,10 @@ on:
   workflow_dispatch:          # 手动触发按钮，改完代码可以直接点一下测试
 
 # 让这个 workflow 有权限把 .keepalive 提交回仓库（保活用）
+# models: read 是给 GitHub Models 那家 AI 供应商用的
 permissions:
   contents: write
+  models: read
 
 # 上一次还没跑完时不要并行启动，避免重复推送
 concurrency:
@@ -37,8 +39,21 @@ jobs:
 
       - name: Generate & Push
         env:
-          ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+          # ---------- 必配 ----------
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+
+          # ---------- AI 供应商：至少配一个 ----------
+          # 完整名单见 push.py 里的 PROVIDERS。
+          # 哪个 Secret 没配，对应那家就会被自动跳过，不会报错。
+          ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+          SILICONFLOW_API_KEY: ${{ secrets.SILICONFLOW_API_KEY }}
+          DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # GitHub Models 用自带的 GITHUB_TOKEN，不用另注册（需要下面的 models: read 权限）
+          GITHUB_MODELS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+          # ---------- 可选 ----------
           NEWS_API_KEY: ${{ secrets.NEWS_API_KEY }}
         run: python push.py
 
