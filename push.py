@@ -10,6 +10,17 @@ import requests
 
 
 # ============================================================
+# 版本标记
+# ============================================================
+#
+# 这个字符串会打印在 Action 日志最开头。
+# 换代码之后点一次 Run workflow，看到这行就说明新代码生效了。
+# ============================================================
+
+CODE_VERSION = "2026-09-21 全 AI 生成版"
+
+
+# ============================================================
 # 配置
 # ============================================================
 
@@ -50,6 +61,9 @@ OPEN_METEO_WEATHER = "https://api.open-meteo.com/v1/forecast"
 NEWS_API_URL = "https://newsapi.org/v2/everything"
 
 GOLD_API_URL = "https://xaus.com/api/v1/spot"
+
+# PushPlus 正文过长时容易被渠道截断，超过这个长度只提醒、不裁剪
+CONTENT_LENGTH_HINT = 20000
 
 
 # ============================================================
@@ -111,53 +125,119 @@ def http_get(url, params=None, headers=None, timeout=20):
 
 
 # ============================================================
-# 每日问候语 / 每日一句：主题轮换
+# 随机创作种子（重要）
 # ============================================================
 #
-# 为什么要有主题池？
+# 下面这些列表**不是**最终文案，而是每次运行随机抽一条、
+# 塞给 AI 当“今天的灵感方向”用的。
 #
-# 免费模型在提示词完全一样时，容易连着几天写出很像的句子。
-# 这里按「日期 + 收件人」算出一个稳定序号，每天固定换一个主题，
-# 一个主题池 24 条 → 同一个人 24 天内不会重复同一个主题，
-# 不同的人算出来的主题也会自然错开。
+# 为什么不把文案写死在这里：
+#   写死的话，兜底文案、模板句式每天长一个样，看着就枯燥。
+#   这里用的是“随机灵感 + 高温度 + 禁止套话”三件套，
+#   每次运行抽到的方向都不一样，AI 每次写出来的句子自然也不一样。
+#
+# 想让它更有变化，直接往下面的列表里加句子就行，加得越多越不重样。
 # ============================================================
 
-QUOTE_THEMES = [
-    "好好照顾自己",
-    "慢慢来，比较快",
-    "专注眼前这一件事",
-    "给自己一点勇气",
-    "把心放平",
-    "允许自己休息",
-    "和在意的人多说几句话",
-    "坚持一件小事",
-    "少一点自我苛责",
-    "保持好奇",
-    "认真吃饭，好好睡觉",
-    "接受不完美",
-    "给自己留一点空白",
-    "把难的事拆小",
-    "记得抬头看看天",
-    "温柔地对待身边的人",
-    "该放下的时候就放下",
-    "今天也值得被期待",
-    "把注意力放回自己身上",
-    "慢一点，也算前进",
-    "心里有光，路就不暗",
-    "不着急，日子还长",
-    "对自己耐心一点",
-    "把今天过好就很好",
-]
-
-GREETING_ANGLES = [
-    "顺着今天真实的天气说一句贴心话",
-    "点出今天的日期或星期，配一句轻松的问候",
+GREETING_SEEDS = [
     "像老朋友一样随口打个招呼",
-    "从“新的一天开始了”的角度问候",
+    "顺着今天真实的天气说一句贴心话",
     "提醒对方先喝口水、吃口早饭再出门",
-    "用一句很短很轻的问候开头",
+    "轻轻提一句今天是星期几",
+    "用一句很短、很轻的话开头",
+    "从窗外天色这样的小细节说起",
+    "像家里人那样叮嘱一句",
+    "从“今天打算做点什么”这样的期待说起",
+    "顺着季节或节气说一句",
+    "用一句能让人放松下来的话开头",
+    "假装刚刚碰面，随口问候一声",
+    "从关心对方昨晚睡得怎么样说起",
+    "从“新的一天开始了”这个角度问候",
+    "提一句今天适合做什么",
 ]
 
+QUOTE_SEEDS = [
+    "好好照顾自己的身体",
+    "允许自己慢一点",
+    "把注意力放回当下",
+    "对自己少一点苛责",
+    "坚持一件很小的事",
+    "允许自己休息和发呆",
+    "和在意的人保持联系",
+    "接受不完美",
+    "把难的事拆小",
+    "给自己一点勇气",
+    "心里留一点期待",
+    "放下已经过去的事",
+    "认真吃一顿饭",
+    "抬头看看天",
+    "不着急，慢慢来",
+    "温柔地提醒自己一句",
+    "把今天过好就够了",
+    "少想一点，多做一点",
+]
+
+TONE_SEEDS = [
+    "温柔平静",
+    "轻松随口",
+    "亲切，像家人说话",
+    "淡淡的、克制的",
+    "简短干脆",
+    "带一点点俏皮",
+]
+
+ADVICE_SEEDS = [
+    "重点提醒穿衣和体感温度",
+    "重点提醒要不要带伞",
+    "重点提醒风大和出行安全",
+    "重点提醒早晚温差",
+    "重点提醒晒不晒、要不要防晒",
+    "重点提醒室内外温差",
+]
+
+TIP_SEEDS = [
+    "关于喝水和作息",
+    "关于久坐之后活动一下身体",
+    "关于眼睛和屏幕",
+    "关于睡前放松",
+    "关于早饭吃什么",
+    "关于情绪和呼吸",
+    "关于收拾一小块桌面或房间",
+]
+
+# 明确禁止出现的套话：这些句子在朋友圈和小红书已经烂大街了，
+# 免费模型特别爱写，直接在提示词里拉黑。
+BANNED_PHRASES = [
+    "让我们一起",
+    "加油",
+    "奥利给",
+    "岁月静好",
+    "未来可期",
+    "人间值得",
+    "不负韶华",
+    "向阳而生",
+    "心中有光",
+    "做最好的自己",
+    "最好的自己",
+    "愿你历尽千帆",
+    "山河远阔",
+    "余生请多指教",
+    "每一天都是崭新的一天",
+    "生活不止眼前的苟且",
+    "浅浅喜，静静爱",
+    "一定要幸福呀",
+]
+
+
+def pick(pool):
+    """从灵感池里随机抽一条。"""
+
+    return random.choice(pool)
+
+
+# ============================================================
+# 中文日期
+# ============================================================
 
 def china_today():
     """返回北京时间对应的 date 对象。"""
@@ -178,84 +258,6 @@ def today_cn():
     date_text = f"{now.year}年{now.month}月{now.day}日"
 
     return date_text, weekdays[now.weekday()]
-
-
-def daily_index(seed_text, total):
-    """
-    按「今天日期 + 收件人标识」算一个稳定序号。
-
-    同一天同一个人结果固定；换一天、换个人就会错开。
-    """
-
-    offset = sum(ord(ch) for ch in seed_text)
-
-    return (china_today().toordinal() + offset) % total
-
-
-def pick_quote_theme(seed_text):
-    return QUOTE_THEMES[daily_index(seed_text, len(QUOTE_THEMES))]
-
-
-def pick_greeting_angle(seed_text):
-    return GREETING_ANGLES[
-        daily_index(seed_text + "-greeting", len(GREETING_ANGLES))
-    ]
-
-
-def fallback_edited(weather, news):
-    """
-    AI 不可用时的兜底文案。
-
-    问候语和短句从池子里随机取，避免“每次失败都发同一句话”。
-    """
-
-    return {
-        "greeting": random.choice(FALLBACK_GREETINGS),
-
-        "daily_quote": random.choice(FALLBACK_QUOTES),
-
-        "weather_summary": (
-            f"今天{weather['city']}天气"
-            f"{weather_code_to_text(weather['weather_code'])}，"
-            f"当前气温 {weather['temperature']}℃。"
-        ),
-
-        "weather_advice": (
-            "请根据实际天气情况合理安排穿衣和出行。"
-        ),
-
-        "domestic_news": news.get("domestic", [])[:3],
-
-        "international_news": news.get("international", [])[:3],
-
-        "gold_summary": (
-            "AI 编辑暂时不可用，以上为 API 获取的金价。"
-        ),
-
-        "daily_tip": "合理安排今天的工作和休息。",
-    }
-
-
-FALLBACK_GREETINGS = [
-    "早上好，新的一天开始了。",
-    "早安，今天也要好好吃饭。",
-    "早上好，愿你今天顺顺利利。",
-    "早安，先喝口热水，再慢慢开始。",
-    "早上好，今天也辛苦了。",
-]
-
-FALLBACK_QUOTES = [
-    "不用一下子走很远，往前挪一小步就很好。",
-    "照顾好自己，是今天最重要的一件事。",
-    "慢一点没关系，你还在往前走就够了。",
-    "把眼前这一件事做好，今天就不算白过。",
-    "累了就歇一会儿，路还长，不用急。",
-    "别对自己太严格，你已经做得很好了。",
-    "心情不太好的时候，先去窗边站一会儿。",
-    "今天也会有好事情发生，值得期待一下。",
-    "把该放下的放下，把该做的做了，就很了不起。",
-    "日子是自己的，按自己的节奏来就好。",
-]
 
 
 # ============================================================
@@ -413,13 +415,8 @@ def weather_code_to_text(code):
 
 
 # ============================================================
-# 获取昨日日期
+# 新闻窗口
 # ============================================================
-
-def get_yesterday():
-    china_tz = timezone(timedelta(hours=8))
-    return (datetime.now(china_tz).date() - timedelta(days=1)).strftime("%Y-%m-%d")
-
 
 def get_news_window():
     """Use a fully-aged rolling window because NewsAPI free/developer plans can delay recent articles."""
@@ -558,7 +555,7 @@ def get_gold_price():
 
 
 # ============================================================
-# 清理 GLM 返回
+# 清理 JSON 文本
 # ============================================================
 
 def clean_json_text(text):
@@ -591,28 +588,123 @@ def clean_json_text(text):
     return text.strip()
 
 
+def parse_json_block(text):
+    """从模型返回里抠出 JSON，容忍前后夹带的说明文字。"""
+
+    content = clean_json_text(text)
+
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        start, end = content.find("{"), content.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                return json.loads(content[start:end + 1])
+            except json.JSONDecodeError:
+                pass
+
+    return None
+
+
+# ============================================================
+# GLM 调用
+# ============================================================
+
+def call_glm(messages, temperature=1.0, max_tokens=3000, retries=3):
+    """
+    统一的 GLM 调用。
+
+    免费模型高峰期容易 429 / 5xx，这里做几次退避重试。
+    """
+
+    payload = {
+        "model": MODEL,
+        "messages": messages,
+        "temperature": temperature,
+        "top_p": 0.95,
+        "max_tokens": max_tokens,
+        "stream": False,
+    }
+
+    last_error = None
+
+    for attempt in range(1, retries + 1):
+        try:
+            response = session.post(
+                ZHIPU_URL,
+                headers={
+                    "Authorization": f"Bearer {ZHIPU_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=90,
+            )
+            response.raise_for_status()
+            data = response.json()
+
+        except (requests.RequestException, ValueError) as e:
+            last_error = e
+            print(f"⚠️ GLM 第 {attempt}/{retries} 次请求失败：{e}")
+            if attempt < retries:
+                time.sleep(5 * attempt)
+            continue
+
+        try:
+            return data["choices"][0]["message"]["content"]
+
+        except (KeyError, IndexError, TypeError):
+            last_error = RuntimeError(f"GLM 返回格式异常：{data}")
+            print(f"⚠️ GLM 第 {attempt}/{retries} 次返回格式异常")
+            if attempt < retries:
+                time.sleep(3 * attempt)
+
+    raise RuntimeError(f"GLM 调用失败：{last_error}")
+
+
 # ============================================================
 # GLM 总编辑
 # ============================================================
 
-SYSTEM_PROMPT = """你是一名每日早报总编辑，只能依据输入数据编辑，不能自行搜索或编造事实。
+SYSTEM_PROMPT = """你是一名每日早报总编辑，同时负责写这一天所有的问候和贴心话。
+只能依据输入数据编辑，不能自行搜索或编造事实。
 
-硬性规则：
-1. 天气、新闻、金价只能使用输入数据。
-2. 不得虚构新闻、数字、来源。
-3. 新闻不足就如实写“暂无足够新闻信息”，不要凑数。
-4. 不写诗，不生成“人民日报金句”，不使用口号式表达。
-5. 不加入政治立场、政治评价或煽动性语言。
-6. greeting：一句温暖、自然、口语化的早安问候语，12-30 字，只写一句话。要按“问候语角度要求”来写，可以自然地带入今天的日期、星期或真实天气，不要提“人工智能/AI/模型”。
-7. daily_quote：一句原创、简短、克制、温暖的励志或治愈短句，15-35 字，围绕“每日一句话的主题”来写，但句子里不要出现主题标签本身。不署名、不冒充名人名言，不用“让我们一起”“加油”“奥利给”这类口号，语气像朋友随口说的一句话。
-8. greeting 和 daily_quote 都必须全新创作：同一个人每天不重样，不同的人彼此不重样，禁止套用固定模板。
-9. 国际新闻输入可能为英文，请用中文准确概括，不得增加输入中没有的事实。
-10. 国内最多 3 条，国际最多 3 条。
-11. 每条新闻保留原始 url 和 source。
-12. gold_summary 只做简短事实说明，不预测涨跌。
-13. 必须输出合法 JSON，不要 Markdown 代码块。
+【硬性规则】
+1. 天气、新闻、金价只能使用输入数据，不得虚构新闻、数字、来源。
+2. 新闻不足就如实写“暂无足够新闻信息”，不要凑数。
+3. 不写诗，不使用口号式表达，不加入政治立场、政治评价或煽动性语言。
+4. 国际新闻输入可能为英文，请用中文准确概括，不得增加输入中没有的事实。
+5. 国内最多 3 条，国际最多 3 条，每条保留原始 url 和 source。
+6. gold_summary 只做简短事实说明，不预测涨跌。
+7. 不要使用 emoji（版面上已经有图标了），不要出现“AI”“模型”“人工智能”这类词。
+8. 必须输出合法 JSON，不要 Markdown 代码块。
 
-JSON 格式：
+【所有文字都要现写，禁止套话】
+下面这些表达一律不许出现：
+<<BAN>>
+
+【各部分怎么写】
+greeting：一句温暖、自然、口语化的早安问候语，12-30 字，只写一句。
+  灵感方向：<<GREETING_SEED>>
+  可以自然地带入今天的日期、星期或真实天气，但别硬塞。
+
+daily_quote：一句原创、简短、克制、温暖的励志或治愈短句，15-35 字。
+  灵感方向：<<QUOTE_SEED>>
+  语气：<<TONE>>
+
+weather_summary：用一句话把今天的天气说清楚，20-40 字，只说事实。
+
+weather_advice：根据输入的真实天气给一条具体可执行的建议，20-45 字。
+  重点方向：<<ADVICE_SEED>>
+  要落到具体动作上（穿什么、带不带伞、什么时候出门），不要写“注意天气变化”这种空话。
+
+daily_tip：一条和今天有关的生活小贴士，15-40 字。
+  方向：<<TIP_SEED>>
+  必须和 weather_advice 不同，不要重复说穿衣带伞的事。
+
+news_status：用一句话说明今天的新闻情况，30 字以内。
+  例如“新闻抓取正常，国内 8 条 / 国际 6 条”，或者“新闻接口暂时不可用，本次不展示新闻”。
+
+【格式】
 {
   "greeting":"...", "daily_quote":"...", "weather_summary":"...", "weather_advice":"...",
   "domestic_news":[{"title":"...","summary":"...","source":"...","url":"..."}],
@@ -621,23 +713,54 @@ JSON 格式：
 }"""
 
 
-def ai_editor(weather, news, gold, seed_text):
-    """
-    调用 GLM 生成当天内容。
+# AI 调用的 JSON 里会出现的字段，全部都要在 render_message 里有对应位置。
+# 漏掉一个就会变成“日志里生成了，消息里却看不到”。
+RENDERED_KEYS = {
+    "greeting",
+    "daily_quote",
+    "weather_summary",
+    "weather_advice",
+    "domestic_news",
+    "international_news",
+    "gold_summary",
+    "daily_tip",
+    "news_status",
+}
 
-    seed_text：收件人标识（例如 “我-烟台”），用来错开每天的问候语主题，
-    保证同一个人不同天、不同人同一天都不会撞句子。
+
+def warn_unrendered(edited):
     """
+    检查 AI 返回了、但消息里没有地方展示的字段。
+
+    这是之前踩过的坑：news_status 一直是生成了却没渲染。
+    """
+
+    extra = [
+        key for key in edited.keys()
+        if key not in RENDERED_KEYS
+    ]
+
+    if extra:
+        print(f"⚠️ 以下字段 AI 生成了但消息里没有展示区域：{extra}")
+
+
+def ai_editor(weather, news, gold):
+    """调用 GLM 生成当天全部文案。"""
 
     print("🤖 GLM 正在进行每日早报总编辑...")
 
     date_text, weekday = today_cn()
 
-    theme = pick_quote_theme(seed_text)
-    greeting_angle = pick_greeting_angle(seed_text)
+    greeting_seed = pick(GREETING_SEEDS)
+    quote_seed = pick(QUOTE_SEEDS)
+    tone = pick(TONE_SEEDS)
+    advice_seed = pick(ADVICE_SEEDS)
+    tip_seed = pick(TIP_SEEDS)
 
-    print(f"🎯 每日一句主题：{theme}")
-    print(f"🎯 问候语角度：{greeting_angle}")
+    print(f"🎲 问候语灵感：{greeting_seed}")
+    print(f"🎲 每日一句灵感：{quote_seed}（语气：{tone}）")
+    print(f"🎲 天气建议方向：{advice_seed}")
+    print(f"🎲 小贴士方向：{tip_seed}")
 
     weather_text = {
         "城市": weather["city"],
@@ -656,9 +779,6 @@ def ai_editor(weather, news, gold, seed_text):
 
     editor_input = {
         "今天日期": f"{date_text} {weekday}",
-        "收件人": seed_text,
-        "问候语角度要求": greeting_angle,
-        "每日一句话的主题": theme,
         "weather": weather_text,
         "news_window": news.get("window", {}),
         "domestic_news": news.get("domestic", []),
@@ -667,64 +787,180 @@ def ai_editor(weather, news, gold, seed_text):
         "gold": gold,
     }
 
-    payload = {
-        "model": MODEL,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+    # 注意：用 replace 而不是 str.format()
+    # 提示词里含有 JSON 的 {} ，用 format() 会直接报错。
+    system_prompt = SYSTEM_PROMPT
+
+    for placeholder, value in [
+        ("<<BAN>>", "、".join(BANNED_PHRASES)),
+        ("<<GREETING_SEED>>", greeting_seed),
+        ("<<QUOTE_SEED>>", quote_seed),
+        ("<<TONE>>", tone),
+        ("<<ADVICE_SEED>>", advice_seed),
+        ("<<TIP_SEED>>", tip_seed),
+    ]:
+        system_prompt = system_prompt.replace(placeholder, value)
+
+    # 温度每次随机：同样的灵感方向，写出来的句子也不一样
+    temperature = round(random.uniform(0.8, 1.0), 2)
+    print(f"🎲 采样温度：{temperature}")
+
+    content = call_glm(
+        [
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": json.dumps(editor_input, ensure_ascii=False, indent=2)},
         ],
-        # 温度调高一点，问候语和短句才不会天天长得一样
-        "temperature": 0.9,
-        "max_tokens": 3000,
-        "stream": False,
-    }
+        temperature=temperature,
+        max_tokens=3000,
+    )
 
-    # 免费模型高峰期偶发 429 / 5xx，重试 3 次，避免整天内容掉回兜底文案
-    data = None
-    last_error = None
+    edited = parse_json_block(content)
 
-    for attempt in range(1, 4):
-        try:
-            response = session.post(
-                ZHIPU_URL,
-                headers={
-                    "Authorization": f"Bearer {ZHIPU_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-                timeout=90,
-            )
-            response.raise_for_status()
-            data = response.json()
-            break
-
-        except requests.RequestException as e:
-            last_error = e
-            print(f"⚠️ GLM 第 {attempt} 次请求失败：{e}")
-            if attempt < 3:
-                time.sleep(5 * attempt)
-
-    if data is None:
-        raise RuntimeError(f"GLM 请求连续失败：{last_error}")
-
-    try:
-        content = data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError):
-        raise RuntimeError(f"GLM 返回格式异常：{data}")
-
-    content = clean_json_text(content)
-
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError:
-        start, end = content.find("{"), content.rfind("}")
-        if start >= 0 and end > start:
-            try:
-                return json.loads(content[start:end + 1])
-            except json.JSONDecodeError:
-                pass
+    if edited is None:
         raise RuntimeError(f"GLM 没有返回合法 JSON：\n{content}")
 
+    warn_unrendered(edited)
+
+    return edited
+
+
+def ai_warm_words_only(weather):
+    """
+    主编调用失败时的抢救方案：
+
+    再单独要一次问候语和每日一句，费用极低，但能保证“温暖的话”
+    仍然是 AI 现写的，而不是掉回固定文案。
+    """
+
+    print("🩺 尝试用轻量调用单独生成问候语和每日一句...")
+
+    date_text, weekday = today_cn()
+
+    warm_prompt = """你是专门写温暖短句的写作者。只输出 JSON，不要任何解释。
+
+要求：
+1. greeting：一句温暖、口语化的早安问候语，12-30 字。
+2. daily_quote：一句原创、温暖的励志或治愈短句，15-35 字，像朋友随口说的一句话。
+3. 两句话都必须全新创作，不要套话，不要 emoji，不要署名，不要提到 AI 或模型。
+4. 不要出现这些表达：<<BAN>>
+
+格式：{"greeting":"...", "daily_quote":"..."}"""
+
+    system_prompt = warm_prompt.replace("<<BAN>>", "、".join(BANNED_PHRASES))
+
+    user_prompt = json.dumps({
+        "今天日期": f"{date_text} {weekday}",
+        "城市": weather.get("city"),
+        "天气": weather_code_to_text(weather.get("weather_code")),
+        "问候语灵感": pick(GREETING_SEEDS),
+        "每日一句灵感": pick(QUOTE_SEEDS),
+    }, ensure_ascii=False)
+
+    try:
+        content = call_glm(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=round(random.uniform(0.85, 1.0), 2),
+            max_tokens=400,
+            retries=2,
+        )
+
+        data = parse_json_block(content)
+
+        if data and str(data.get("greeting", "")).strip() and str(data.get("daily_quote", "")).strip():
+            return {
+                "greeting": str(data["greeting"]).strip(),
+                "daily_quote": str(data["daily_quote"]).strip(),
+            }
+
+        print(f"⚠️ 轻量调用没有返回可用内容：{content}")
+
+    except Exception as e:
+        print(f"⚠️ 轻量调用失败：{e}")
+
+    return None
+
+
+# 两次 AI 都失败时的最后兜底（随机取，尽量不重样）
+LAST_RESORT_GREETINGS = [
+    "早上好，新的一天开始了。",
+    "早安，今天也要好好吃饭。",
+    "早上好，愿你今天顺顺利利。",
+    "早安，先喝口热水，再慢慢开始。",
+    "早上好，今天也辛苦了。",
+    "早安，慢慢来就好。",
+]
+
+LAST_RESORT_QUOTES = [
+    "不用一下子走很远，往前挪一小步就很好。",
+    "照顾好自己，是今天最重要的一件事。",
+    "慢一点没关系，你还在往前走就够了。",
+    "把眼前这一件事做好，今天就不算白过。",
+    "累了就歇一会儿，路还长，不用急。",
+    "别对自己太严格，你已经做得很好了。",
+    "心情不太好的时候，先去窗边站一会儿。",
+    "今天也会有好事情发生，值得期待一下。",
+    "把该放下的放下，把该做的做了，就很了不起。",
+    "日子是自己的，按自己的节奏来就好。",
+]
+
+
+def fallback_edited(weather, news, gold):
+    """
+    AI 完全不可用时的兜底。
+
+    仍然先试着用轻量调用单独写问候语和每日一句；
+    真的两次都失败，才退回随机兜底句。
+    """
+
+    warm = ai_warm_words_only(weather)
+
+    if warm:
+        greeting = warm["greeting"]
+        daily_quote = warm["daily_quote"]
+    else:
+        greeting = random.choice(LAST_RESORT_GREETINGS)
+        daily_quote = random.choice(LAST_RESORT_QUOTES)
+
+    news_status = (
+        f"新闻抓取：国内 {len(news.get('domestic', []))} 条 / "
+        f"国际 {len(news.get('international', []))} 条"
+    )
+
+    if news.get("errors"):
+        news_status += "（部分查询失败）"
+
+    return {
+        "greeting": greeting,
+        "daily_quote": daily_quote,
+
+        "weather_summary": (
+            f"今天{weather['city']}天气"
+            f"{weather_code_to_text(weather['weather_code'])}，"
+            f"当前气温 {weather['temperature']}℃，"
+            f"今日 {weather['today_min']}℃ ～ {weather['today_max']}℃。"
+        ),
+
+        "weather_advice": (
+            "请根据实际天气情况合理安排穿衣和出行。"
+        ),
+
+        "domestic_news": news.get("domestic", [])[:3],
+        "international_news": news.get("international", [])[:3],
+
+        "gold_summary": "以上为接口获取到的金价，仅供参考。",
+
+        "daily_tip": "合理安排今天的工作和休息。",
+
+        "news_status": news_status,
+    }
+
+
+# ============================================================
+# 渲染
+# ============================================================
 
 def render_news(news_list):
     if not news_list:
@@ -741,72 +977,115 @@ def render_news(news_list):
     return "".join(out)
 
 
+def render_news_section(edited):
+    """
+    新闻区块。
+
+    没有任何新闻时，不再留两个空的“国内/国际”空格子，
+    而是合成一块，并把 AI 写的 news_status 显示出来。
+    """
+
+    domestic = edited.get("domestic_news", []) or []
+    international = edited.get("international_news", []) or []
+
+    news_status = str(edited.get("news_status", "") or "").strip()
+
+    status_html = (
+        f'<div style="margin-top:10px;color:#999;font-size:12px;">'
+        f'📌 {escape(news_status)}</div>'
+        if news_status else ""
+    )
+
+    if not domestic and not international:
+        return f"""
+    <div style="
+        background:#f5f7fa;
+        padding:12px;
+        border-radius:10px;
+        margin-bottom:15px;
+    ">
+        <div style="font-size:17px;font-weight:bold;">
+            📰 新闻
+        </div>
+        <div style="margin-top:5px;">
+            暂无足够新闻信息。
+        </div>
+        {status_html}
+    </div>
+"""
+
+    return f"""
+    <div style="
+        font-size:17px;
+        font-weight:bold;
+        margin-bottom:8px;
+    ">
+        🇨🇳 近期国内新闻
+    </div>
+
+    {render_news(domestic)}
+
+
+    <div style="
+        font-size:17px;
+        font-weight:bold;
+        margin-top:15px;
+        margin-bottom:8px;
+    ">
+        🌍 近期国际新闻
+    </div>
+
+    {render_news(international)}
+
+    {status_html}
+"""
+
+
 def render_message(weather, gold, edited):
+    """
+    把 AI 生成的内容渲染成 HTML。
+
+    注意：edited 里每个字段都必须在这里有位置，
+    否则就会出现“日志里生成了、消息里却看不到”。
+    """
 
     city = escape(weather["city"])
 
     date_text, weekday = today_cn()
 
     greeting = escape(
-        str(edited.get("greeting", "早上好！"))
+        str(edited.get("greeting", "") or "早上好")
     )
 
     daily_quote = escape(
-        str(
-            edited.get(
-                "daily_quote",
-                "慢一点也没关系，照顾好自己，再继续向前。"
-            )
-        )
+        str(edited.get("daily_quote", "") or "照顾好自己，慢慢来。")
     )
 
     weather_summary = escape(
-        str(
-            edited.get(
-                "weather_summary",
-                ""
-            )
-        )
+        str(edited.get("weather_summary", "") or "")
     )
 
     weather_advice = escape(
-        str(
-            edited.get(
-                "weather_advice",
-                ""
-            )
-        )
+        str(edited.get("weather_advice", "") or "")
     )
 
     gold_summary = escape(
-        str(
-            edited.get(
-                "gold_summary",
-                ""
-            )
-        )
+        str(edited.get("gold_summary", "") or "")
     )
 
     daily_tip = escape(
-        str(
-            edited.get(
-                "daily_tip",
-                ""
-            )
-        )
+        str(edited.get("daily_tip", "") or "")
     )
 
-    domestic_news = render_news(
-        edited.get("domestic_news", [])
-    )
-
-    international_news = render_news(
-        edited.get("international_news", [])
-    )
+    news_block = render_news_section(edited)
 
     temperature = weather.get("temperature")
     today_min = weather.get("today_min")
     today_max = weather.get("today_max")
+    apparent = weather.get("apparent_temperature")
+    rain = weather.get("rain_probability")
+    wind = weather.get("wind_speed")
+    humidity = weather.get("humidity")
 
     gold_price = gold.get("price_usd_oz")
 
@@ -863,14 +1142,18 @@ def render_message(weather, gold, edited):
         </div>
 
         <div style="margin-top:6px;">
-            当前：{temperature}℃
+            当前：{temperature}℃（体感 {apparent}℃）
         </div>
 
         <div>
             今日：{today_min}℃ ～ {today_max}℃
         </div>
 
-        <div style="margin-top:5px;">
+        <div>
+            降水概率：{rain}% ｜ 湿度：{humidity}% ｜ 风速：{wind}km/h
+        </div>
+
+        <div style="margin-top:6px;">
             {weather_summary}
         </div>
 
@@ -883,29 +1166,7 @@ def render_message(weather, gold, edited):
 
     </div>
 
-
-    <div style="
-        font-size:17px;
-        font-weight:bold;
-        margin-bottom:8px;
-    ">
-        🇨🇳 近期国内新闻
-    </div>
-
-    {domestic_news}
-
-
-    <div style="
-        font-size:17px;
-        font-weight:bold;
-        margin-top:15px;
-        margin-bottom:8px;
-    ">
-        🌍 近期国际新闻
-    </div>
-
-    {international_news}
-
+{news_block}
 
     <div style="
         background:#fff8e6;
@@ -930,11 +1191,12 @@ def render_message(weather, gold, edited):
 
 
     <div style="
+        background:#fdf3f7;
+        padding:12px;
+        border-radius:10px;
         margin-top:15px;
-        padding-top:10px;
-        border-top:1px solid #eee;
     ">
-        💡 <b>今日小贴士：</b>{daily_tip}
+        🌱 <b>今日小贴士：</b>{daily_tip}
     </div>
 
 
@@ -962,14 +1224,24 @@ def push_title():
     return f"☀️ 每日早报 · {now.month}月{now.day}日"
 
 
-def send_to_self(content):
-    """
-    给自己发送：
-    使用 PUSHPLUS_TOKEN 作为发送账号 Token，
-    不传 "to"，这样 PushPlus 会发送给当前账号本人。
-    """
+def check_content(content):
+    """检查正文长度，过长时提醒（PushPlus 部分渠道会截断）。"""
 
-    print("📨 正在发送给：我")
+    print(f"📏 正文长度：{len(content)} 字符")
+
+    if len(content) > CONTENT_LENGTH_HINT:
+        print(
+            f"⚠️ 正文超过 {CONTENT_LENGTH_HINT} 字符，"
+            f"部分推送渠道可能截断，考虑减少新闻条数。"
+        )
+
+
+def send_push(content, friend_token=None, name="我"):
+    """
+    统一的 PushPlus 发送。
+
+    friend_token 为 None 时发给自己（不传 "to"）。
+    """
 
     payload = {
         "token": PUSHPLUS_TOKEN.strip(),
@@ -979,72 +1251,13 @@ def send_to_self(content):
         "channel": "wechat",
     }
 
-    response = session.post(
-        PUSHPLUS_URL,
-        json=payload,
-        timeout=30
-    )
-
-    print(
-        f"PushPlus HTTP 状态：{response.status_code}"
-    )
-
-    try:
-        result = response.json()
-    except Exception:
-        print("❌ PushPlus 返回不是 JSON：")
-        print(response.text)
-        return False
-
-    print(f"📡 PushPlus 返回：{result}")
-
-    code = result.get("code")
-
-    if code == 200:
-        print("✅ 我 PushPlus 请求成功")
-        return True
-
-    print(
-        f"❌ 我 PushPlus 业务错误："
-        f"{result.get('msg')} / {result.get('data')}"
-    )
-
-    if code == 903:
-        print(
-            "⚠️ PushPlus Token 无效，请检查 GitHub Secret "
-            "PUSHPLUS_TOKEN 是否填写为自己的 PushPlus 用户 Token。"
-        )
-
-    elif code == 905:
-        print(
-            "⚠️ PushPlus 当前账号尚未完成实名认证。"
-        )
-
-    elif code == 999:
-        print(
-            "⚠️ PushPlus 返回 999。请检查自己的 PushPlus 账号、"
-            "公众号关注关系以及 PUSHPLUS_TOKEN。"
-        )
-
-    return False
-
-
-def send_to_friend(friend_token, content, name):
-
-    # 防止复制 Token 时混入空格 / Tab / 换行
-    friend_token = friend_token.strip()
+    if friend_token:
+        payload["to"] = friend_token.strip()
 
     print(f"📨 正在发送给：{name}")
-    print(f"🔑 Token 长度：{len(friend_token)}")
 
-    payload = {
-        "token": PUSHPLUS_TOKEN.strip(),
-        "title": push_title(),
-        "content": content,
-        "template": "html",
-        "channel": "wechat",
-        "to": friend_token,
-    }
+    if friend_token:
+        print(f"🔑 好友 Token 长度：{len(friend_token.strip())}")
 
     response = session.post(
         PUSHPLUS_URL,
@@ -1052,9 +1265,7 @@ def send_to_friend(friend_token, content, name):
         timeout=30
     )
 
-    print(
-        f"PushPlus HTTP 状态：{response.status_code}"
-    )
+    print(f"PushPlus HTTP 状态：{response.status_code}")
 
     try:
         result = response.json()
@@ -1068,7 +1279,9 @@ def send_to_friend(friend_token, content, name):
     code = result.get("code")
 
     if code == 200:
-        print(f"✅ {name} PushPlus 请求成功")
+        # data 一般是消息流水号，有它才算真的投递出去了
+        message_id = result.get("data")
+        print(f"✅ {name} PushPlus 接收成功，消息ID：{message_id}")
         return True
 
     print(
@@ -1076,25 +1289,25 @@ def send_to_friend(friend_token, content, name):
         f"{result.get('msg')} / {result.get('data')}"
     )
 
-    if code == 999:
-
+    if code == 903:
         print(
-            "⚠️ PushPlus 返回 999。"
-            "请检查好友 Token 是否仍是“我的好友”列表中的有效 Token，"
-            "以及好友是否仍保持公众号关注关系。"
-        )
-
-    elif code == 903:
-
-        print(
-            "⚠️ PushPlus Token 无效，请检查 PUSHPLUS_TOKEN。"
+            "⚠️ PushPlus Token 无效，请检查 PUSHPLUS_TOKEN "
+            "是否填写为自己的 PushPlus 用户 Token。"
         )
 
     elif code == 905:
+        print("⚠️ PushPlus 当前账号尚未完成实名认证。")
 
+    elif code == 999:
         print(
-            "⚠️ PushPlus 当前账号尚未完成实名认证。"
+            "⚠️ PushPlus 返回 999。请检查账号、好友 Token "
+            "是否仍在“我的好友”列表中，以及公众号关注关系是否还在。"
         )
+
+    # 推送失败时把正文打进日志，方便直接看到“生成了什么、有没有渲染出来”
+    print("\n----- 未能推送的正文（HTML 源码）开始 -----")
+    print(content)
+    print("----- 未能推送的正文结束 -----\n")
 
     return False
 
@@ -1128,37 +1341,28 @@ def build_and_send(name, city, send_func, news, gold):
         print(f"❌ {name} 天气获取失败：{e}")
         return False
 
-    # 用来错开每个人的每日一句主题
-    seed_text = f"{name}-{city}"
-
     try:
-        edited = ai_editor(
-            weather,
-            news=news,
-            gold=gold,
-            seed_text=seed_text,
-        )
-
+        edited = ai_editor(weather, news, gold)
         print("✅ GLM 总编辑完成")
 
     except Exception as e:
         print(f"❌ GLM 编辑失败：{e}")
-
-        # AI 失败时仍然给出基础信息，问候语和短句从兜底池随机取
-        edited = fallback_edited(weather, news)
+        edited = fallback_edited(weather, news, gold)
 
     # AI 偶尔会漏字段 / 返回空串，这里补齐
-    if not str(edited.get("greeting", "")).strip():
-        edited["greeting"] = random.choice(FALLBACK_GREETINGS)
+    if not str(edited.get("greeting", "") or "").strip():
+        edited["greeting"] = random.choice(LAST_RESORT_GREETINGS)
 
-    if not str(edited.get("daily_quote", "")).strip():
-        edited["daily_quote"] = random.choice(FALLBACK_QUOTES)
+    if not str(edited.get("daily_quote", "") or "").strip():
+        edited["daily_quote"] = random.choice(LAST_RESORT_QUOTES)
 
     content = render_message(
         weather=weather,
         gold=gold,
         edited=edited,
     )
+
+    check_content(content)
 
     try:
         return send_func(content)
@@ -1171,7 +1375,7 @@ def build_and_send(name, city, send_func, news, gold):
 def main():
 
     print("=" * 60)
-    print("☀️ 每日早报开始")
+    print(f"☀️ 每日早报开始（{CODE_VERSION}）")
     print("=" * 60)
 
     date_text, weekday = today_cn()
@@ -1212,17 +1416,9 @@ def main():
 
     print("\n📊 公共数据获取完成")
 
-    print(
-        f"国内新闻：{len(news['domestic'])} 条"
-    )
-
-    print(
-        f"国际新闻：{len(news['international'])} 条"
-    )
-
-    print(
-        f"国际金价：{gold['price_usd_oz']}"
-    )
+    print(f"国内新闻：{len(news['domestic'])} 条")
+    print(f"国际新闻：{len(news['international'])} 条")
+    print(f"国际金价：{gold['price_usd_oz']}")
 
     # --------------------------------------------------------
     # 2. 处理自己
@@ -1231,7 +1427,7 @@ def main():
     ok = build_and_send(
         name=MY_RECIPIENT["name"],
         city=MY_RECIPIENT["city"],
-        send_func=send_to_self,
+        send_func=lambda content: send_push(content, name=MY_RECIPIENT["name"]),
         news=news,
         gold=gold,
     )
@@ -1254,9 +1450,9 @@ def main():
         ok = build_and_send(
             name=name,
             city=city,
-            send_func=lambda content, _token=token, _name=name: send_to_friend(
+            send_func=lambda content, _token=token, _name=name: send_push(
+                content,
                 friend_token=_token,
-                content=content,
                 name=_name,
             ),
             news=news,
