@@ -2,13 +2,27 @@ name: Daily WeChat Push with GLM
 
 on:
   schedule:
-    # UTC 1:00 = 北京时间 9:00
-    - cron: '0 1 * * *'
-  workflow_dispatch:
+    # 注意：GitHub 的 cron 用的是 UTC 时间，不是北京时间。
+    # UTC 1:07 = 北京时间 9:07。
+    # 故意不写整点：每小时第 0 分钟是 GitHub 定时任务最拥挤的时候，
+    # 经常延迟几十分钟甚至被跳过，错开几分钟稳定很多。
+    - cron: '7 1 * * *'
+  workflow_dispatch:          # 手动触发按钮，改完代码可以直接点一下测试
+
+# 让这个 workflow 有权限把 .keepalive 提交回仓库（保活用）
+permissions:
+  contents: write
+
+# 上一次还没跑完时不要并行启动，避免重复推送
+concurrency:
+  group: daily-push
+  cancel-in-progress: false
 
 jobs:
   daily-push:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -19,7 +33,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install requests python-dotenv
+        run: pip install requests
 
       - name: Generate & Push
         env:
@@ -27,3 +41,33 @@ jobs:
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
           NEWS_API_KEY: ${{ secrets.NEWS_API_KEY }}
         run: python push.py
+
+      # GitHub 会在仓库连续 60 天没有任何提交活动后，自动停用定时工作流。
+      # 这一步每 30 天提交一次 .keepalive，让仓库一直“有活动”，定时任务就不会被停掉。
+      # 即使这步因为权限问题失败，也不影响早报推送（推送在上面已经完成）。
+      - name: Repository keep-alive
+        continue-on-error: true
+        run: |
+          FILE=".keepalive"
+          LAST=0
+          if [ -f "$FILE" ]; then
+            LAST=$(cat "$FILE" 2>/dev/null || echo 0)
+          fi
+          if [ -z "$LAST" ]; then
+            LAST=0
+          fi
+
+          NOW=$(date -u +%s)
+          DAYS=$(( (NOW - LAST) / 86400 ))
+          echo "距离上次保活：${DAYS} 天"
+
+          if [ "$DAYS" -ge 30 ]; then
+            echo "$NOW" > "$FILE"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add "$FILE"
+            git commit -m "chore: keep-alive $(date -u +%F)"
+            git push
+          else
+            echo "还没到 30 天，跳过保活提交"
+          fi
