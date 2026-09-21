@@ -17,7 +17,7 @@ import requests
 # 换代码之后点一次 Run workflow，看到这行就说明新代码生效了。
 # ============================================================
 
-CODE_VERSION = "2026-09-21 全 AI 生成版"
+CODE_VERSION = "2026-09-21 多 AI 供应商版"
 
 
 # ============================================================
@@ -44,15 +44,72 @@ def read_env(name, required=True):
     return value
 
 
-ZHIPU_API_KEY = read_env("ZHIPU_API_KEY")
 PUSHPLUS_TOKEN = read_env("PUSHPLUS_TOKEN")
 
 # 新闻属于“可选能力”：即使没配 NEWS_API_KEY，天气 / 问候语 / 每日一句 / 金价照样能发
 NEWS_API_KEY = read_env("NEWS_API_KEY", required=False)
 
-MODEL = "glm-4.7-flash"
 
-ZHIPU_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+# ============================================================
+# AI 供应商（想接别的免费 AI，只改这一段）
+# ============================================================
+#
+# 这是一个“排队”结构：前面一家被限流或者挂掉，自动换后面一家。
+# 只有配了 Key 的供应商才会被使用——没配 Key 的会自动跳过，不会报错。
+# 也就是说，你在 GitHub Secrets 里配了哪几家，就用哪几家。
+#
+# 要求：接口得是 OpenAI 兼容的（POST /chat/completions + Bearer 鉴权）。
+# 下面这几家都满足，国内国外常见的基本也都是。
+#
+# 想加一家新的，照着格式加一条就行，其他地方都不用动：
+#   name    —— 只用来在日志里显示
+#   url     —— 完整的 chat/completions 地址
+#   key_env —— 从哪个环境变量读 Key
+#   models  —— 该家的模型名，按顺序尝试
+#
+# 注意：模型名各家都会不时更新。写错了也不怕——
+# 日志会提示，然后自动跳到下一家，不会影响整封早报。
+# ============================================================
+
+PROVIDERS = [
+    {
+        "name": "智谱 GLM（免费）",
+        "url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+        "key_env": "ZHIPU_API_KEY",
+        "models": ["glm-4.7-flash", "glm-4-flash"],
+    },
+    {
+        "name": "硅基流动 SiliconFlow（有免费模型）",
+        "url": "https://api.siliconflow.cn/v1/chat/completions",
+        "key_env": "SILICONFLOW_API_KEY",
+        "models": ["Qwen/Qwen3-8B"],
+    },
+    {
+        "name": "阿里云百炼 DashScope（新用户有免费额度）",
+        "url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+        "key_env": "DASHSCOPE_API_KEY",
+        "models": ["qwen-flash"],
+    },
+    {
+        "name": "OpenRouter（挑带 :free 的免费模型）",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "key_env": "OPENROUTER_API_KEY",
+        "models": ["deepseek/deepseek-chat:free"],
+    },
+    {
+        "name": "Gemini（OpenAI 兼容层）",
+        "url": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        "key_env": "GEMINI_API_KEY",
+        "models": ["gemini-2.5-flash"],
+    },
+    {
+        "name": "GitHub Models（用 GITHUB_TOKEN，不用另外注册）",
+        "url": "https://models.github.ai/inference/chat/completions",
+        "key_env": "GITHUB_MODELS_TOKEN",
+        "models": ["openai/gpt-4o-mini"],
+    },
+]
+
 PUSHPLUS_URL = "https://www.pushplus.plus/send"
 
 OPEN_METEO_GEOCODING = "https://geocoding-api.open-meteo.com/v1/search"
@@ -483,6 +540,28 @@ def dedupe_news(items):
     return out
 
 
+def slim_news(items, limit=8, max_desc=200):
+    """
+    送给 AI 之前先把新闻瘦身。
+
+    只保留前 limit 条，描述截断到 max_desc 字。
+    请求小一点 → token 少一点 → 更不容易被限流（429），
+    反正正文里最多也只展示 3 条。
+    """
+
+    slim = []
+
+    for item in items[:limit]:
+        slim.append({
+            "title": item.get("title", ""),
+            "description": (item.get("description") or "")[:max_desc],
+            "source": item.get("source", ""),
+            "url": item.get("url", ""),
+        })
+
+    return slim
+
+
 def get_all_news():
     if not NEWS_API_KEY:
         print("⚠️ 未配置 NEWS_API_KEY，本次跳过新闻模块。")
@@ -607,58 +686,114 @@ def parse_json_block(text):
 
 
 # ============================================================
-# GLM 调用
+# AI 调用
 # ============================================================
 
-def call_glm(messages, temperature=1.0, max_tokens=3000, retries=3):
-    """
-    统一的 GLM 调用。
+def get_provider_key(provider):
+    """读取某家供应商的 Key；没配就返回空字符串，这家会被跳过。"""
 
-    免费模型高峰期容易 429 / 5xx，这里做几次退避重试。
+    return os.environ.get(provider["key_env"], "").strip()
+
+
+def active_providers():
+    """本次实际能用的供应商（也就是配了 Key 的那些）。"""
+
+    return [p for p in PROVIDERS if get_provider_key(p)]
+
+
+def call_ai(messages, temperature=1.0, max_tokens=3000, attempts_per_model=2):
+    """
+    依次尝试所有配了 Key 的 AI 供应商。
+
+    顺序是：供应商 → 该家的模型 → 重试次数。
+    任何一步失败都往下走，全部都不行才抛错。
+
+    所以某家的模型名写错了、或者某家被限流了，
+    只会跳过那一家，不会影响整封早报。
     """
 
-    payload = {
-        "model": MODEL,
-        "messages": messages,
-        "temperature": temperature,
-        "top_p": 0.95,
-        "max_tokens": max_tokens,
-        "stream": False,
-    }
+    providers = active_providers()
+
+    if not providers:
+        raise RuntimeError(
+            "没有任何可用的 AI 供应商。请在 GitHub Secrets 里至少配置一个："
+            + " / ".join(p["key_env"] for p in PROVIDERS)
+        )
+
+    print(f"🔌 可用供应商：{'、'.join(p['name'] for p in providers)}")
 
     last_error = None
 
-    for attempt in range(1, retries + 1):
-        try:
-            response = session.post(
-                ZHIPU_URL,
-                headers={
-                    "Authorization": f"Bearer {ZHIPU_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-                timeout=90,
-            )
-            response.raise_for_status()
-            data = response.json()
+    for provider in providers:
 
-        except (requests.RequestException, ValueError) as e:
-            last_error = e
-            print(f"⚠️ GLM 第 {attempt}/{retries} 次请求失败：{e}")
-            if attempt < retries:
-                time.sleep(5 * attempt)
-            continue
+        key = get_provider_key(provider)
 
-        try:
-            return data["choices"][0]["message"]["content"]
+        for model in provider["models"]:
 
-        except (KeyError, IndexError, TypeError):
-            last_error = RuntimeError(f"GLM 返回格式异常：{data}")
-            print(f"⚠️ GLM 第 {attempt}/{retries} 次返回格式异常")
-            if attempt < retries:
-                time.sleep(3 * attempt)
+            for attempt in range(1, attempts_per_model + 1):
 
-    raise RuntimeError(f"GLM 调用失败：{last_error}")
+                is_last = (
+                    provider is providers[-1]
+                    and model == provider["models"][-1]
+                    and attempt == attempts_per_model
+                )
+
+                payload = {
+                    "model": model,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "top_p": 0.95,
+                    "max_tokens": max_tokens,
+                    "stream": False,
+                }
+
+                try:
+                    response = session.post(
+                        provider["url"],
+                        headers={
+                            "Authorization": f"Bearer {key}",
+                            "Content-Type": "application/json",
+                        },
+                        json=payload,
+                        timeout=90,
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+
+                except (requests.RequestException, ValueError) as e:
+                    last_error = e
+                    print(
+                        f"⚠️ {provider['name']} / {model} "
+                        f"第 {attempt}/{attempts_per_model} 次失败：{e}"
+                    )
+                    if not is_last:
+                        time.sleep(6 * attempt + random.uniform(0, 4))
+                    continue
+
+                try:
+                    content = data["choices"][0]["message"]["content"]
+
+                except (KeyError, IndexError, TypeError):
+                    last_error = RuntimeError(f"{provider['name']} 返回格式异常：{data}")
+                    print(f"⚠️ {provider['name']} 返回格式异常，换下一家")
+                    break
+
+                # 限流时经常返回 200 + 空内容，这种也要当成失败
+                if not content or not content.strip():
+                    last_error = RuntimeError(f"{provider['name']} 返回了空内容")
+                    print(
+                        f"⚠️ {provider['name']} / {model} 返回空内容（常见于限流）"
+                    )
+                    if not is_last:
+                        time.sleep(3 * attempt)
+                    continue
+
+                print(f"✅ AI 调用成功（{provider['name']} / {model}）")
+                return content
+
+            print(f"↪️ {provider['name']} 的 {model} 没成功，继续往下试...")
+
+    raise RuntimeError(f"所有 AI 供应商都失败了：{last_error}")
 
 
 # ============================================================
@@ -745,9 +880,9 @@ def warn_unrendered(edited):
 
 
 def ai_editor(weather, news, gold):
-    """调用 GLM 生成当天全部文案。"""
+    """调用 AI 生成当天全部文案。"""
 
-    print("🤖 GLM 正在进行每日早报总编辑...")
+    print("🤖 AI 正在进行每日早报总编辑...")
 
     date_text, weekday = today_cn()
 
@@ -781,8 +916,8 @@ def ai_editor(weather, news, gold):
         "今天日期": f"{date_text} {weekday}",
         "weather": weather_text,
         "news_window": news.get("window", {}),
-        "domestic_news": news.get("domestic", []),
-        "international_news": news.get("international", []),
+        "domestic_news": slim_news(news.get("domestic", [])),
+        "international_news": slim_news(news.get("international", [])),
         "news_errors": news.get("errors", []),
         "gold": gold,
     }
@@ -805,7 +940,7 @@ def ai_editor(weather, news, gold):
     temperature = round(random.uniform(0.8, 1.0), 2)
     print(f"🎲 采样温度：{temperature}")
 
-    content = call_glm(
+    content = call_ai(
         [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": json.dumps(editor_input, ensure_ascii=False, indent=2)},
@@ -817,7 +952,7 @@ def ai_editor(weather, news, gold):
     edited = parse_json_block(content)
 
     if edited is None:
-        raise RuntimeError(f"GLM 没有返回合法 JSON：\n{content}")
+        raise RuntimeError(f"AI 没有返回合法 JSON：\n{content}")
 
     warn_unrendered(edited)
 
@@ -857,14 +992,14 @@ def ai_warm_words_only(weather):
     }, ensure_ascii=False)
 
     try:
-        content = call_glm(
+        content = call_ai(
             [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             temperature=round(random.uniform(0.85, 1.0), 2),
             max_tokens=400,
-            retries=2,
+            attempts_per_model=2,
         )
 
         data = parse_json_block(content)
@@ -1041,13 +1176,22 @@ def render_news_section(edited):
 """
 
 
-def render_message(weather, gold, edited):
+def render_message(weather, gold, edited, is_fallback=False):
     """
     把 AI 生成的内容渲染成 HTML。
 
     注意：edited 里每个字段都必须在这里有位置，
     否则就会出现“日志里生成了、消息里却看不到”。
+
+    is_fallback=True 表示这次 AI 没成功、用的是备用文案，
+    消息里会加一行小字说明，免得你再对着日志猜“为什么不一样”。
     """
+
+    fallback_note = (
+        '<div style="color:#c98a5a;font-size:12px;margin-bottom:10px;">'
+        '（今日 AI 暂时不可用，本篇为备用文案）</div>'
+        if is_fallback else ""
+    )
 
     city = escape(weather["city"])
 
@@ -1109,6 +1253,8 @@ def render_message(weather, gold, edited):
     ">
         📅 {date_text} {weekday}
     </div>
+
+    {fallback_note}
 
 
     <div style="
@@ -1341,12 +1487,19 @@ def build_and_send(name, city, send_func, news, gold):
         print(f"❌ {name} 天气获取失败：{e}")
         return False
 
+    is_fallback = False
+
     try:
         edited = ai_editor(weather, news, gold)
-        print("✅ GLM 总编辑完成")
+        print("✅ AI 总编辑完成")
 
     except Exception as e:
-        print(f"❌ GLM 编辑失败：{e}")
+        print(f"❌ AI 编辑失败：{e}")
+        is_fallback = True
+        print(
+            "⚠️ 本次使用备用文案：天气建议和今日小贴士会是通用句子，"
+            "不代表 AI 生成了却没显示。"
+        )
         edited = fallback_edited(weather, news, gold)
 
     # AI 偶尔会漏字段 / 返回空串，这里补齐
@@ -1360,6 +1513,7 @@ def build_and_send(name, city, send_func, news, gold):
         weather=weather,
         gold=gold,
         edited=edited,
+        is_fallback=is_fallback,
     )
 
     check_content(content)
